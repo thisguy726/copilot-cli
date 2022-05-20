@@ -1,4 +1,4 @@
-FROM node:16.11.1
+FROM node:gallium-buster
 
 # Create app directory
 WORKDIR /usr/src/app
