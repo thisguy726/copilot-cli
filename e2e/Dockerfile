@@ -1,4 +1,4 @@
-FROM docker:stable-dind
+FROM docker:19.03.14-dind
 
 ARG GOLANG_VERSION=1.16.6
 
