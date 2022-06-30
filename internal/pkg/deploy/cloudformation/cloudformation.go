@@ -46,6 +46,7 @@ type StackConfiguration interface {
 	Template() (string, error)
 	Parameters() ([]*sdkcloudformation.Parameter, error)
 	Tags() []*sdkcloudformation.Tag
+	SerializedParameters() (string, error)
 }
 
 type ecsClient interface {
@@ -71,6 +72,7 @@ type cfnClient interface {
 	ListStacksWithTags(tags map[string]string) ([]cloudformation.StackDescription, error)
 	ErrorEvents(stackName string) ([]cloudformation.StackEvent, error)
 	Outputs(stack *cloudformation.Stack) (map[string]string, error)
+	StackResources(name string) ([]*cloudformation.StackResource, error)
 
 	// Methods vended by the aws sdk struct.
 	DescribeStackEvents(*sdkcloudformation.DescribeStackEventsInput) (*sdkcloudformation.DescribeStackEventsOutput, error)
@@ -85,7 +87,7 @@ type codePipelineClient interface {
 }
 
 type s3Client interface {
-	PutArtifact(bucket, fileName string, data io.Reader) (string, error)
+	Upload(bucket, fileName string, data io.Reader) (string, error)
 }
 
 type stackSetClient interface {

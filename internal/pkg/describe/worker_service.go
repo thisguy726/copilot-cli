@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"text/tabwriter"
 
+	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
+
 	cfnstack "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
@@ -17,35 +19,39 @@ import (
 
 // WorkerServiceDescriber retrieves information about a worker service.
 type WorkerServiceDescriber struct {
-	*ecsServiceDescriber
+	app             string
+	svc             string
+	enableResources bool
+
+	store             DeployedEnvServicesLister
+	initECSDescriber  func(string) (ecsDescriber, error)
+	svcStackDescriber map[string]ecsDescriber
 }
 
 // NewWorkerServiceDescriber instantiates a worker service describer.
 func NewWorkerServiceDescriber(opt NewServiceConfig) (*WorkerServiceDescriber, error) {
 	describer := &WorkerServiceDescriber{
-		ecsServiceDescriber: &ecsServiceDescriber{
-			app:               opt.App,
-			svc:               opt.Svc,
-			enableResources:   opt.EnableResources,
-			store:             opt.DeployStore,
-			svcStackDescriber: make(map[string]ecsStackDescriber),
-		},
+		app:             opt.App,
+		svc:             opt.Svc,
+		enableResources: opt.EnableResources,
+		store:           opt.DeployStore,
+
+		svcStackDescriber: make(map[string]ecsDescriber),
 	}
-	describer.initDescribers = func(env string) error {
-		if _, ok := describer.svcStackDescriber[env]; ok {
-			return nil
+	describer.initECSDescriber = func(env string) (ecsDescriber, error) {
+		if describer, ok := describer.svcStackDescriber[env]; ok {
+			return describer, nil
 		}
-		d, err := NewECSServiceDescriber(NewServiceConfig{
+		d, err := newECSServiceDescriber(NewServiceConfig{
 			App:         opt.App,
-			Env:         env,
 			Svc:         opt.Svc,
 			ConfigStore: opt.ConfigStore,
-		})
+		}, env)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		describer.svcStackDescriber[env] = d
-		return nil
+		return d, nil
 	}
 	return describer, nil
 }
@@ -61,13 +67,17 @@ func (d *WorkerServiceDescriber) Describe() (HumanJSONStringer, error) {
 	var envVars []*containerEnvVar
 	var secrets []*secret
 	for _, env := range environments {
-		err := d.initDescribers(env)
+		svcDescr, err := d.initECSDescriber(env)
 		if err != nil {
 			return nil, err
 		}
-		svcParams, err := d.svcStackDescriber[env].Params()
+		svcParams, err := svcDescr.Params()
 		if err != nil {
 			return nil, fmt.Errorf("get stack parameters for environment %s: %w", env, err)
+		}
+		containerPlatform, err := svcDescr.Platform()
+		if err != nil {
+			return nil, fmt.Errorf("retrieve platform: %w", err)
 		}
 		configs = append(configs, &ECSServiceConfig{
 			ServiceConfig: &ServiceConfig{
@@ -75,15 +85,16 @@ func (d *WorkerServiceDescriber) Describe() (HumanJSONStringer, error) {
 				Port:        blankContainerPort,
 				CPU:         svcParams[cfnstack.WorkloadTaskCPUParamKey],
 				Memory:      svcParams[cfnstack.WorkloadTaskMemoryParamKey],
+				Platform:    dockerengine.PlatformString(containerPlatform.OperatingSystem, containerPlatform.Architecture),
 			},
 			Tasks: svcParams[cfnstack.WorkloadTaskCountParamKey],
 		})
-		workerSvcEnvVars, err := d.svcStackDescriber[env].EnvVars()
+		workerSvcEnvVars, err := svcDescr.EnvVars()
 		if err != nil {
 			return nil, fmt.Errorf("retrieve environment variables: %w", err)
 		}
 		envVars = append(envVars, flattenContainerEnvVars(env, workerSvcEnvVars)...)
-		webSvcSecrets, err := d.svcStackDescriber[env].Secrets()
+		webSvcSecrets, err := svcDescr.Secrets()
 		if err != nil {
 			return nil, fmt.Errorf("retrieve secrets: %w", err)
 		}
@@ -93,11 +104,11 @@ func (d *WorkerServiceDescriber) Describe() (HumanJSONStringer, error) {
 	resources := make(map[string][]*stack.Resource)
 	if d.enableResources {
 		for _, env := range environments {
-			err := d.initDescribers(env)
+			svcDescr, err := d.initECSDescriber(env)
 			if err != nil {
 				return nil, err
 			}
-			stackResources, err := d.svcStackDescriber[env].ServiceStackResources()
+			stackResources, err := svcDescr.ServiceStackResources()
 			if err != nil {
 				return nil, fmt.Errorf("retrieve service resources: %w", err)
 			}

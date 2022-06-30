@@ -31,16 +31,24 @@ type WorkerService struct {
 	parser template.Parser
 }
 
+// Publish returns the list of topics where notifications can be published.
+func (s *WorkerService) Publish() []Topic {
+	return s.WorkerServiceConfig.PublishConfig.Topics
+}
+
 // WorkerServiceConfig holds the configuration that can be overridden per environments.
 type WorkerServiceConfig struct {
 	ImageConfig      ImageWithHealthcheck `yaml:"image,flow"`
 	ImageOverride    `yaml:",inline"`
 	TaskConfig       `yaml:",inline"`
-	Logging          `yaml:"logging,flow"`
+	Logging          Logging                   `yaml:"logging,flow"`
 	Sidecars         map[string]*SidecarConfig `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
 	Subscribe        SubscribeConfig           `yaml:"subscribe"`
+	PublishConfig    PublishConfig             `yaml:"publish"`
 	Network          NetworkConfig             `yaml:"network"`
 	TaskDefOverrides []OverrideRule            `yaml:"taskdef_overrides"`
+	DeployConfig     DeploymentConfiguration   `yaml:"deployment"`
+	Observability    Observability             `yaml:"observability"`
 }
 
 // SubscribeConfig represents the configurable options for setting up subscriptions.
@@ -56,12 +64,14 @@ func (s *SubscribeConfig) IsEmpty() bool {
 
 // TopicSubscription represents the configurable options for setting up a SNS Topic Subscription.
 type TopicSubscription struct {
-	Name    *string        `yaml:"name"`
-	Service *string        `yaml:"service"`
-	Queue   SQSQueueOrBool `yaml:"queue"`
+	Name         *string                `yaml:"name"`
+	Service      *string                `yaml:"service"`
+	FilterPolicy map[string]interface{} `yaml:"filter_policy"`
+	Queue        SQSQueueOrBool         `yaml:"queue"`
 }
 
-// SQSQueueOrBool contains custom unmarshaling logic for the `queue` field in the manifest.
+// SQSQueueOrBool is a custom type which supports unmarshaling yaml which
+// can either be of type bool or type SQSQueue.
 type SQSQueueOrBool struct {
 	Advanced SQSQueue
 	Enabled  *bool
@@ -72,7 +82,7 @@ func (q *SQSQueueOrBool) IsEmpty() bool {
 	return q.Advanced.IsEmpty() && q.Enabled == nil
 }
 
-// UnmarshalYAML implements the yaml(v3) interface. It allows SQSQueue to be specified as a
+// UnmarshalYAML implements the yaml(v3) interface. It allows SQSQueueOrBool to be specified as a
 // string or a struct alternately.
 func (q *SQSQueueOrBool) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&q.Advanced); err != nil {
@@ -83,13 +93,11 @@ func (q *SQSQueueOrBool) UnmarshalYAML(value *yaml.Node) error {
 			return err
 		}
 	}
-
 	if !q.Advanced.IsEmpty() {
 		// Unmarshaled successfully to q.Advanced, unset q.Enabled, and return.
 		q.Enabled = nil
 		return nil
 	}
-
 	if err := value.Decode(&q.Enabled); err != nil {
 		return errUnmarshalQueueOpts
 	}
@@ -138,6 +146,11 @@ func NewWorkerService(props WorkerServiceProps) *WorkerService {
 	svc.WorkerServiceConfig.ImageConfig.Image.Location = stringP(props.Image)
 	svc.WorkerServiceConfig.ImageConfig.Image.Build.BuildArgs.Dockerfile = stringP(props.Dockerfile)
 	svc.WorkerServiceConfig.ImageConfig.HealthCheck = props.HealthCheck
+	svc.WorkerServiceConfig.Platform = props.Platform
+	if isWindowsPlatform(props.Platform) {
+		svc.WorkerServiceConfig.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
+		svc.WorkerServiceConfig.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
+	}
 	svc.WorkerServiceConfig.Subscribe.Topics = props.Topics
 	svc.WorkerServiceConfig.Platform = props.Platform
 	svc.parser = template.New()
@@ -165,6 +178,11 @@ func (s *WorkerService) BuildRequired() (bool, error) {
 // BuildArgs returns a docker.BuildArguments object for the service given a workspace root directory
 func (s *WorkerService) BuildArgs(wsRoot string) *DockerBuildArgs {
 	return s.ImageConfig.Image.BuildConfig(wsRoot)
+}
+
+// EnvFile returns the location of the env file against the ws root directory.
+func (s *WorkerService) EnvFile() string {
+	return aws.StringValue(s.TaskConfig.EnvFile)
 }
 
 // Subscriptions returns a list of TopicSubscriotion objects which represent the SNS topics the service
@@ -199,6 +217,14 @@ func (s WorkerService) ApplyEnv(envName string) (WorkloadManifest, error) {
 	return &s, nil
 }
 
+// RequiredEnvironmentFeatures returns environment features that are required for this manifest.
+func (s *WorkerService) RequiredEnvironmentFeatures() []string {
+	var features []string
+	features = append(features, s.Network.requiredEnvFeatures()...)
+	features = append(features, s.Storage.requiredEnvFeatures()...)
+	return features
+}
+
 // newDefaultWorkerService returns a Worker service with minimal task sizes and a single replica.
 func newDefaultWorkerService() *WorkerService {
 	return &WorkerService{
@@ -223,7 +249,9 @@ func newDefaultWorkerService() *WorkerService {
 			},
 			Network: NetworkConfig{
 				VPC: vpcConfig{
-					Placement: &PublicSubnetPlacement,
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PublicSubnetPlacement),
+					},
 				},
 			},
 		},

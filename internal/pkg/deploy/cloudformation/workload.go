@@ -5,17 +5,23 @@ package cloudformation
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
+	"github.com/aws/copilot-cli/internal/pkg/template/artifactpath"
 	"github.com/aws/copilot-cli/internal/pkg/term/progress"
 )
 
 // DeployService deploys a service stack and renders progress updates to out until the deployment is done.
 // If the service stack doesn't exist, then it creates the stack.
 // If the service stack already exists, it updates the stack.
-func (cf CloudFormation) DeployService(out progress.FileWriter, conf StackConfiguration, opts ...cloudformation.StackOption) error {
-	stack, err := toStack(conf)
+func (cf CloudFormation) DeployService(out progress.FileWriter, conf StackConfiguration, bucketName string, opts ...cloudformation.StackOption) error {
+	templateURL, err := cf.uploadStackTemplateToS3(bucketName, conf)
+	if err != nil {
+		return err
+	}
+	stack, err := toStackFromS3(conf, templateURL)
 	if err != nil {
 		return err
 	}
@@ -23,6 +29,23 @@ func (cf CloudFormation) DeployService(out progress.FileWriter, conf StackConfig
 		opt(stack)
 	}
 	return cf.renderStackChanges(cf.newRenderWorkloadInput(out, stack))
+}
+
+type uploadableStack interface {
+	StackName() string
+	Template() (string, error)
+}
+
+func (cf CloudFormation) uploadStackTemplateToS3(bucket string, stack uploadableStack) (string, error) {
+	tmpl, err := stack.Template()
+	if err != nil {
+		return "", fmt.Errorf("generate template: %w", err)
+	}
+	url, err := cf.s3Client.Upload(bucket, artifactpath.CFNTemplate(stack.StackName(), []byte(tmpl)), strings.NewReader(tmpl))
+	if err != nil {
+		return "", err
+	}
+	return url, nil
 }
 
 func (cf CloudFormation) handleStackError(stackName string, err error) error {

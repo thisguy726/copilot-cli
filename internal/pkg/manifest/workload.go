@@ -1,19 +1,16 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package manifest provides functionality to create Manifest files.
 package manifest
 
 import (
 	"errors"
 	"fmt"
 	"path/filepath"
-	"strconv"
-	"time"
+	"strings"
 
 	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
-
-	"github.com/dustin/go-humanize/english"
+	"github.com/aws/copilot-cli/internal/pkg/template"
 
 	"github.com/google/shlex"
 
@@ -22,39 +19,79 @@ import (
 )
 
 const (
-	defaultFluentbitImage = "amazon/aws-for-fluent-bit:latest"
 	defaultDockerfileName = "Dockerfile"
 )
 
-var (
+const (
 	// AWS VPC subnet placement options.
-	PublicSubnetPlacement  = Placement("public")
-	PrivateSubnetPlacement = Placement("private")
-
-	// WorkloadTypes holds all workload manifest types.
-	WorkloadTypes = append(ServiceTypes, JobTypes...)
-
-	// All placement options.
-	subnetPlacements = []string{string(PublicSubnetPlacement), string(PrivateSubnetPlacement)}
-
-	validPlatforms        = []string{dockerengine.DockerBuildPlatform(dockerengine.LinuxOS, dockerengine.Amd64Arch)}
-	validOperatingSystems = []string{dockerengine.LinuxOS}
-	validArchitectures    = []string{dockerengine.Amd64Arch}
-
-	// Error definitions.
-	errUnmarshalBuildOpts    = errors.New("unable to unmarshal build field into string or compose-style map")
-	errUnmarshalPlatformOpts = errors.New("unable to unmarshal platform field into string or compose-style map")
-	errUnmarshalCountOpts    = errors.New(`unable to unmarshal "count" field to an integer or autoscaling configuration`)
-	errUnmarshalRangeOpts    = errors.New(`unable to unmarshal "range" field`)
-	errUnmarshalExec         = errors.New("unable to unmarshal exec field into boolean or exec configuration")
-	errUnmarshalEntryPoint   = errors.New("unable to unmarshal entrypoint into string or slice of strings")
-	errUnmarshalCommand      = errors.New("unable to unmarshal command into string or slice of strings")
+	PublicSubnetPlacement  = PlacementString("public")
+	PrivateSubnetPlacement = PlacementString("private")
 )
+
+// All placement options.
+var (
+	subnetPlacements = []string{string(PublicSubnetPlacement), string(PrivateSubnetPlacement)}
+)
+
+// Error definitions.
+var (
+	ErrAppRunnerInvalidPlatformWindows = errors.New("Windows is not supported for App Runner services")
+
+	errUnmarshalBuildOpts     = errors.New("unable to unmarshal build field into string or compose-style map")
+	errUnmarshalPlatformOpts  = errors.New("unable to unmarshal platform field into string or compose-style map")
+	errUnmarshalPlacementOpts = errors.New("unable to unmarshal placement field into string or compose-style map")
+	errUnmarshalCountOpts     = errors.New(`unable to unmarshal "count" field to an integer or autoscaling configuration`)
+	errUnmarshalRangeOpts     = errors.New(`unable to unmarshal "range" field`)
+
+	errUnmarshalExec       = errors.New(`unable to unmarshal "exec" field into boolean or exec configuration`)
+	errUnmarshalEntryPoint = errors.New(`unable to unmarshal "entrypoint" into string or slice of strings`)
+	errUnmarshalAlias      = errors.New(`unable to unmarshal "alias" into advanced alias map, string, or slice of strings`)
+	errUnmarshalCommand    = errors.New(`unable to unmarshal "command" into string or slice of strings`)
+)
+
+// WorkloadTypes returns the list of all manifest types.
+func WorkloadTypes() []string {
+	return append(ServiceTypes(), JobTypes()...)
+}
 
 // WorkloadManifest represents a workload manifest.
 type WorkloadManifest interface {
 	ApplyEnv(envName string) (WorkloadManifest, error)
 	Validate() error
+	RequiredEnvironmentFeatures() []string
+}
+
+// UnmarshalWorkload deserializes the YAML input stream into a workload manifest object.
+// If an error occurs during deserialization, then returns the error.
+// If the workload type in the manifest is invalid, then returns an ErrInvalidManifestType.
+func UnmarshalWorkload(in []byte) (WorkloadManifest, error) {
+	type manifest interface {
+		WorkloadManifest
+	}
+	am := Workload{}
+	if err := yaml.Unmarshal(in, &am); err != nil {
+		return nil, fmt.Errorf("unmarshal to workload manifest: %w", err)
+	}
+	typeVal := aws.StringValue(am.Type)
+	var m manifest
+	switch typeVal {
+	case LoadBalancedWebServiceType:
+		m = newDefaultLoadBalancedWebService()
+	case RequestDrivenWebServiceType:
+		m = newDefaultRequestDrivenWebService()
+	case BackendServiceType:
+		m = newDefaultBackendService()
+	case WorkerServiceType:
+		m = newDefaultWorkerService()
+	case ScheduledJobType:
+		m = newDefaultScheduledJob()
+	default:
+		return nil, &ErrInvalidWorkloadType{Type: typeVal}
+	}
+	if err := yaml.Unmarshal(in, m); err != nil {
+		return nil, fmt.Errorf("unmarshal manifest for %s: %w", typeVal, err)
+	}
+	return m, nil
 }
 
 // WorkloadProps contains properties for creating a new workload manifest.
@@ -70,15 +107,6 @@ type Workload struct {
 	Type *string `yaml:"type"` // must be one of the supported manifest types.
 }
 
-// OverrideRule holds the manifest overriding rule for CloudFormation template.
-type OverrideRule struct {
-	Path  string    `yaml:"path"`
-	Value yaml.Node `yaml:"value"`
-}
-
-// DependsOn represents container dependency for a container.
-type DependsOn map[string]string
-
 // Image represents the workload's container image.
 type Image struct {
 	Build        BuildArgsOrString `yaml:"build"`           // Build an image from a Dockerfile.
@@ -87,6 +115,9 @@ type Image struct {
 	DockerLabels map[string]string `yaml:"labels,flow"`     // Apply Docker labels to the container at runtime.
 	DependsOn    DependsOn         `yaml:"depends_on,flow"` // Add any sidecar dependencies.
 }
+
+// DependsOn represents container dependency for a container.
+type DependsOn map[string]string
 
 // UnmarshalYAML overrides the default YAML unmarshaling logic for the Image
 // struct, allowing it to perform more complex unmarshaling behavior.
@@ -104,24 +135,6 @@ func (i *Image) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 	return nil
-}
-
-// ImageWithHealthcheck represents a container image with health check.
-type ImageWithHealthcheck struct {
-	Image       Image                `yaml:",inline"`
-	HealthCheck ContainerHealthCheck `yaml:"healthcheck"`
-}
-
-// ImageWithPortAndHealthcheck represents a container image with an exposed port and health check.
-type ImageWithPortAndHealthcheck struct {
-	ImageWithPort `yaml:",inline"`
-	HealthCheck   ContainerHealthCheck `yaml:"healthcheck"`
-}
-
-// ImageWithPort represents a container image with an exposed port.
-type ImageWithPort struct {
-	Image Image   `yaml:",inline"`
-	Port  *uint16 `yaml:"port"`
 }
 
 // GetLocation returns the location of the image.
@@ -258,6 +271,10 @@ type stringSliceOrString struct {
 	StringSlice []string
 }
 
+func (s *stringSliceOrString) isEmpty() bool {
+	return s.String == nil && len(s.StringSlice) == 0
+}
+
 func unmarshalYAMLToStringSliceOrString(s *stringSliceOrString, value *yaml.Node) error {
 	if err := value.Decode(&s.StringSlice); err != nil {
 		switch err.(type) {
@@ -351,115 +368,6 @@ func (b *DockerBuildArgs) isEmpty() bool {
 	return false
 }
 
-// ExecuteCommand is a custom type which supports unmarshaling yaml which
-// can either be of type bool or type ExecuteCommandConfig.
-type ExecuteCommand struct {
-	Enable *bool
-	Config ExecuteCommandConfig
-}
-
-// UnmarshalYAML overrides the default YAML unmarshaling logic for the ExecuteCommand
-// struct, allowing it to perform more complex unmarshaling behavior.
-// This method implements the yaml.Unmarshaler (v3) interface.
-func (e *ExecuteCommand) UnmarshalYAML(value *yaml.Node) error {
-	if err := value.Decode(&e.Config); err != nil {
-		switch err.(type) {
-		case *yaml.TypeError:
-			break
-		default:
-			return err
-		}
-	}
-
-	if !e.Config.IsEmpty() {
-		return nil
-	}
-
-	if err := value.Decode(&e.Enable); err != nil {
-		return errUnmarshalExec
-	}
-	return nil
-}
-
-// ExecuteCommandConfig represents the configuration for ECS Execute Command.
-type ExecuteCommandConfig struct {
-	Enable *bool `yaml:"enable"`
-	// Reserved for future use.
-}
-
-// IsEmpty returns whether ExecuteCommandConfig is empty.
-func (e ExecuteCommandConfig) IsEmpty() bool {
-	return e.Enable == nil
-}
-
-// Logging holds configuration for Firelens to route your logs.
-type Logging struct {
-	Retention      *int              `yaml:"retention"`
-	Image          *string           `yaml:"image"`
-	Destination    map[string]string `yaml:"destination,flow"`
-	EnableMetadata *bool             `yaml:"enableMetadata"`
-	SecretOptions  map[string]string `yaml:"secretOptions"`
-	ConfigFile     *string           `yaml:"configFilePath"`
-}
-
-// IsEmpty returns empty if the struct has all zero members.
-func (lc *Logging) IsEmpty() bool {
-	return lc.Image == nil && lc.Destination == nil && lc.EnableMetadata == nil && lc.SecretOptions == nil && lc.ConfigFile == nil
-}
-
-// LogImage returns the default Fluent Bit image if not otherwise configured.
-func (lc *Logging) LogImage() *string {
-	if lc.Image == nil {
-		return aws.String(defaultFluentbitImage)
-	}
-	return lc.Image
-}
-
-// GetEnableMetadata returns the configuration values and sane default for the EnableMEtadata field
-func (lc *Logging) GetEnableMetadata() *string {
-	if lc.EnableMetadata == nil {
-		// Enable ecs log metadata by default.
-		return aws.String("true")
-	}
-	return aws.String(strconv.FormatBool(*lc.EnableMetadata))
-}
-
-// SidecarConfig represents the configurable options for setting up a sidecar container.
-type SidecarConfig struct {
-	Port          *string              `yaml:"port"`
-	Image         *string              `yaml:"image"`
-	Essential     *bool                `yaml:"essential"`
-	CredsParam    *string              `yaml:"credentialsParameter"`
-	Variables     map[string]string    `yaml:"variables"`
-	Secrets       map[string]string    `yaml:"secrets"`
-	MountPoints   []SidecarMountPoint  `yaml:"mount_points"`
-	DockerLabels  map[string]string    `yaml:"labels"`
-	DependsOn     DependsOn            `yaml:"depends_on"`
-	HealthCheck   ContainerHealthCheck `yaml:"healthcheck"`
-	ImageOverride `yaml:",inline"`
-}
-
-// TaskConfig represents the resource boundaries and environment variables for the containers in the task.
-type TaskConfig struct {
-	CPU            *int                 `yaml:"cpu"`
-	Memory         *int                 `yaml:"memory"`
-	Platform       PlatformArgsOrString `yaml:"platform,omitempty"`
-	Count          Count                `yaml:"count"`
-	ExecuteCommand ExecuteCommand       `yaml:"exec"`
-	Variables      map[string]string    `yaml:"variables"`
-	Secrets        map[string]string    `yaml:"secrets"`
-	Storage        Storage              `yaml:"storage"`
-}
-
-// TaskPlatform returns the platform for the service.
-func (t *TaskConfig) TaskPlatform() (*string, error) {
-	if t.Platform.PlatformString == nil {
-		return nil, nil
-	}
-	val := string(*t.Platform.PlatformString)
-	return &val, nil
-}
-
 // PublishConfig represents the configurable options for setting up publishers.
 type PublishConfig struct {
 	Topics []Topic `yaml:"topics"`
@@ -480,150 +388,68 @@ func (c *NetworkConfig) IsEmpty() bool {
 	return c.VPC.isEmpty()
 }
 
-// UnmarshalYAML ensures that a NetworkConfig always defaults to public subnets.
-// If the user specified a placement that's not valid then throw an error.
-func (c *NetworkConfig) UnmarshalYAML(value *yaml.Node) error {
-	type networkWithDefaults NetworkConfig
-	publicPlacement := Placement(PublicSubnetPlacement)
-	defaultVPCConf := vpcConfig{
-		Placement: &publicPlacement,
+func (c *NetworkConfig) requiredEnvFeatures() []string {
+	if aws.StringValue((*string)(c.VPC.Placement.PlacementString)) == string(PrivateSubnetPlacement) {
+		return []string{template.NATFeatureName}
 	}
-	conf := networkWithDefaults{
-		VPC: defaultVPCConf,
-	}
-	if err := value.Decode(&conf); err != nil {
-		return err
-	}
-	if conf.VPC.isEmpty() { // If after unmarshaling the user did not specify VPC configuration then reset it to public.
-		conf.VPC = defaultVPCConf
-	}
-	if !conf.VPC.isValidPlacement() {
-		return fmt.Errorf("field '%s' is '%v' must be one of %#v", "network.vpc.placement", string(*conf.VPC.Placement), subnetPlacements)
-	}
-	*c = NetworkConfig(conf)
 	return nil
 }
 
-// Placement represents where to place tasks (public or private subnets).
-type Placement string
+// PlacementArgOrString represents where to place tasks.
+type PlacementArgOrString struct {
+	*PlacementString
+	PlacementArgs
+}
+
+// IsEmpty returns empty if the struct has all zero members.
+func (p *PlacementArgOrString) IsEmpty() bool {
+	return p.PlacementString == nil && p.PlacementArgs.isEmpty()
+}
+
+// UnmarshalYAML overrides the default YAML unmarshaling logic for the PlacementArgOrString
+// struct, allowing it to perform more complex unmarshaling behavior.
+// This method implements the yaml.Unmarshaler (v3) interface.
+func (p *PlacementArgOrString) UnmarshalYAML(value *yaml.Node) error {
+	if err := value.Decode(&p.PlacementArgs); err != nil {
+		switch err.(type) {
+		case *yaml.TypeError:
+			break
+		default:
+			return err
+		}
+	}
+	if !p.PlacementArgs.isEmpty() {
+		// Unmarshaled successfully to p.PlacementArgs, unset p.PlacementString, and return.
+		p.PlacementString = nil
+		return nil
+	}
+	if err := value.Decode(&p.PlacementString); err != nil {
+		return errUnmarshalPlacementOpts
+	}
+	return nil
+}
+
+// PlacementArgs represents what subnets to place tasks.
+type PlacementArgs struct {
+	Subnets []string `yaml:"subnets"`
+}
+
+func (p *PlacementArgs) isEmpty() bool {
+	return p.Subnets == nil || len(p.Subnets) == 0
+}
+
+// PlacementString represents what types of subnets (public or private subnets) to place tasks.
+type PlacementString string
 
 // vpcConfig represents the security groups and subnets attached to a task.
 type vpcConfig struct {
-	*Placement     `yaml:"placement"`
-	SecurityGroups []string `yaml:"security_groups"`
+	Placement      PlacementArgOrString `yaml:"placement"`
+	SecurityGroups []string             `yaml:"security_groups"`
 }
 
 func (c *vpcConfig) isEmpty() bool {
-	return c.Placement == nil && c.SecurityGroups == nil
+	return c.Placement.IsEmpty() && c.SecurityGroups == nil
 }
-
-func (c *vpcConfig) isValidPlacement() bool {
-	if c.Placement == nil {
-		return false
-	}
-	for _, allowed := range subnetPlacements {
-		if string(*c.Placement) == allowed {
-			return true
-		}
-	}
-	return false
-}
-
-// UnmarshalWorkload deserializes the YAML input stream into a workload manifest object.
-// If an error occurs during deserialization, then returns the error.
-// If the workload type in the manifest is invalid, then returns an ErrInvalidManifestType.
-func UnmarshalWorkload(in []byte) (WorkloadManifest, error) {
-	am := Workload{}
-	if err := yaml.Unmarshal(in, &am); err != nil {
-		return nil, fmt.Errorf("unmarshal to workload manifest: %w", err)
-	}
-	typeVal := aws.StringValue(am.Type)
-
-	switch typeVal {
-	case LoadBalancedWebServiceType:
-		m := newDefaultLoadBalancedWebService()
-		if err := yaml.Unmarshal(in, m); err != nil {
-			return nil, fmt.Errorf("unmarshal to load balanced web service: %w", err)
-		}
-		return m, nil
-	case RequestDrivenWebServiceType:
-		m := newDefaultRequestDrivenWebService()
-		if err := yaml.Unmarshal(in, m); err != nil {
-			return nil, fmt.Errorf("unmarshal to request-driven web service: %w", err)
-		}
-		return m, nil
-	case BackendServiceType:
-		m := newDefaultBackendService()
-		if err := yaml.Unmarshal(in, m); err != nil {
-			return nil, fmt.Errorf("unmarshal to backend service: %w", err)
-		}
-		return m, nil
-	case WorkerServiceType:
-		m := newDefaultWorkerService()
-		if err := yaml.Unmarshal(in, m); err != nil {
-			return nil, fmt.Errorf("unmarshal to worker service: %w", err)
-		}
-		return m, nil
-	case ScheduledJobType:
-		m := newDefaultScheduledJob()
-		if err := yaml.Unmarshal(in, m); err != nil {
-			return nil, fmt.Errorf("unmarshal to scheduled job: %w", err)
-		}
-		return m, nil
-	default:
-		return nil, &ErrInvalidWorkloadType{Type: typeVal}
-	}
-}
-
-// ContainerHealthCheck holds the configuration to determine if the service container is healthy.
-// See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-ecs-taskdefinition-healthcheck.html
-type ContainerHealthCheck struct {
-	Command     []string       `yaml:"command"`
-	Interval    *time.Duration `yaml:"interval"`
-	Retries     *int           `yaml:"retries"`
-	Timeout     *time.Duration `yaml:"timeout"`
-	StartPeriod *time.Duration `yaml:"start_period"`
-}
-
-// NewDefaultContainerHealthCheck returns container health check configuration
-// that's identical to a load balanced web service's defaults.
-func NewDefaultContainerHealthCheck() *ContainerHealthCheck {
-	return &ContainerHealthCheck{
-		Command:     []string{"CMD-SHELL", "curl -f http://localhost/ || exit 1"},
-		Interval:    durationp(10 * time.Second),
-		Retries:     aws.Int(2),
-		Timeout:     durationp(5 * time.Second),
-		StartPeriod: durationp(0 * time.Second),
-	}
-}
-
-// IsEmpty checks if the health check is empty.
-func (hc ContainerHealthCheck) IsEmpty() bool {
-	return hc.Command == nil && hc.Interval == nil && hc.Retries == nil && hc.Timeout == nil && hc.StartPeriod == nil
-}
-
-// ApplyIfNotSet changes the healthcheck's fields only if they were not set and the other healthcheck has them set.
-func (hc *ContainerHealthCheck) ApplyIfNotSet(other *ContainerHealthCheck) {
-	if hc.Command == nil && other.Command != nil {
-		hc.Command = other.Command
-	}
-	if hc.Interval == nil && other.Interval != nil {
-		hc.Interval = other.Interval
-	}
-	if hc.Retries == nil && other.Retries != nil {
-		hc.Retries = other.Retries
-	}
-	if hc.Timeout == nil && other.Timeout != nil {
-		hc.Timeout = other.Timeout
-	}
-	if hc.StartPeriod == nil && other.StartPeriod != nil {
-		hc.StartPeriod = other.StartPeriod
-	}
-}
-
-// PlatformString represents the platform string consisting of OS family and architecture type.
-// For example: "windows/x86"
-type PlatformString string
 
 // PlatformArgsOrString is a custom type which supports unmarshaling yaml which
 // can either be of type string or type PlatformArgs.
@@ -644,17 +470,7 @@ func (p *PlatformArgsOrString) UnmarshalYAML(value *yaml.Node) error {
 			return err
 		}
 	}
-
 	if !p.PlatformArgs.isEmpty() {
-		if !p.PlatformArgs.bothSpecified() {
-			return errors.New(`fields 'osfamily' and 'architecture' must either both be specified or both be empty.`)
-		}
-		if err := validateOS(p.PlatformArgs.OSFamily); err != nil {
-			return fmt.Errorf("validate OS: %w", err)
-		}
-		if err := validateArch(p.PlatformArgs.Arch); err != nil {
-			return fmt.Errorf("validate arch: %w", err)
-		}
 		// Unmarshaled successfully to p.PlatformArgs, unset p.PlatformString, and return.
 		p.PlatformString = nil
 		return nil
@@ -662,16 +478,44 @@ func (p *PlatformArgsOrString) UnmarshalYAML(value *yaml.Node) error {
 	if err := value.Decode(&p.PlatformString); err != nil {
 		return errUnmarshalPlatformOpts
 	}
-	if err := validatePlatform(p.PlatformString); err != nil {
-		return fmt.Errorf("validate platform: %w", err)
-	}
 	return nil
+}
+
+// OS returns the operating system family.
+func (p *PlatformArgsOrString) OS() string {
+	if p := aws.StringValue((*string)(p.PlatformString)); p != "" {
+		args := strings.Split(p, "/")
+		return strings.ToLower(args[0])
+	}
+	return strings.ToLower(aws.StringValue(p.PlatformArgs.OSFamily))
+}
+
+// Arch returns the architecture of PlatformArgsOrString.
+func (p *PlatformArgsOrString) Arch() string {
+	if p := aws.StringValue((*string)(p.PlatformString)); p != "" {
+		args := strings.Split(p, "/")
+		return strings.ToLower(args[1])
+	}
+	return strings.ToLower(aws.StringValue(p.PlatformArgs.Arch))
 }
 
 // PlatformArgs represents the specifics of a target OS.
 type PlatformArgs struct {
 	OSFamily *string `yaml:"osfamily,omitempty"`
 	Arch     *string `yaml:"architecture,omitempty"`
+}
+
+// PlatformString represents the string format of Platform.
+type PlatformString string
+
+// String implements the fmt.Stringer interface.
+func (p *PlatformArgs) String() string {
+	return fmt.Sprintf("('%s', '%s')", aws.StringValue(p.OSFamily), aws.StringValue(p.Arch))
+}
+
+// IsEmpty returns if the platform field is empty.
+func (p *PlatformArgsOrString) IsEmpty() bool {
+	return p.PlatformString == nil && p.PlatformArgs.isEmpty()
 }
 
 func (p *PlatformArgs) isEmpty() bool {
@@ -682,40 +526,38 @@ func (p *PlatformArgs) bothSpecified() bool {
 	return (p.OSFamily != nil) && (p.Arch != nil)
 }
 
-func validatePlatform(platform *PlatformString) error {
-	if platform == nil {
-		return nil
-	}
-	for _, validPlatform := range validPlatforms {
-		if string(*platform) == validPlatform {
-			return nil
-		}
-	}
-	return fmt.Errorf("platform %s is invalid; %s: %s", string(*platform), english.PluralWord(len(validPlatforms), "the valid platform is", "valid platforms are"), english.WordSeries(validPlatforms, "and"))
+// platformString returns a specified of the format <os>/<arch>.
+func platformString(os, arch string) string {
+	return fmt.Sprintf("%s/%s", os, arch)
 }
 
-func validateOS(os *string) error {
-	if os == nil {
-		return nil
+// RedirectPlatform returns a platform that's supported for the given manifest type.
+func RedirectPlatform(os, arch, wlType string) (platform string, err error) {
+	// Return nil if passed the default platform.
+	if platformString(os, arch) == defaultPlatform {
+		return "", nil
 	}
-	for _, validOS := range validOperatingSystems {
-		if aws.StringValue(os) == validOS {
-			return nil
-		}
+	// Return an error if a platform cannot be redirected.
+	if wlType == RequestDrivenWebServiceType && os == OSWindows {
+		return "", ErrAppRunnerInvalidPlatformWindows
 	}
-	return fmt.Errorf("OS %s is invalid; %s: %s", aws.StringValue(os), english.PluralWord(len(validOperatingSystems), "the valid operating system is", "valid operating systems are"), english.WordSeries(validOperatingSystems, "and"))
+	// All architectures default to 'x86_64' (though 'arm64' is now also supported); leave OS as is.
+	// If a string is returned, the platform is not the default platform but is supported (except for more obscure platforms).
+	return platformString(os, dockerengine.ArchX86), nil
 }
 
-func validateArch(arch *string) error {
-	if arch == nil {
-		return nil
-	}
-	for _, validArch := range validArchitectures {
-		if aws.StringValue(arch) == validArch {
-			return nil
+func isWindowsPlatform(platform PlatformArgsOrString) bool {
+	for _, win := range windowsOSFamilies {
+		if platform.OS() == win {
+			return true
 		}
 	}
-	return fmt.Errorf("architecture %s is invalid; %s: %s", aws.StringValue(arch), english.PluralWord(len(validArchitectures), "the valid architecture is", "valid architectures are"), english.WordSeries(validArchitectures, "and"))
+	return false
+}
+
+// IsArmArch returns whether or not the arch is ARM.
+func IsArmArch(arch string) bool {
+	return strings.ToLower(arch) == ArchARM || strings.ToLower(arch) == ArchARM64
 }
 
 func requiresBuild(image Image) (bool, error) {
@@ -730,17 +572,18 @@ func requiresBuild(image Image) (bool, error) {
 	return false, nil
 }
 
-func dockerfileBuildRequired(workloadType string, svc interface{}) (bool, error) {
+// DockerfileBuildRequired returns if the workload container image should be built from local Dockerfile.
+func DockerfileBuildRequired(svc interface{}) (bool, error) {
 	type manifest interface {
 		BuildRequired() (bool, error)
 	}
 	mf, ok := svc.(manifest)
 	if !ok {
-		return false, fmt.Errorf("%s does not have required methods BuildRequired()", workloadType)
+		return false, fmt.Errorf("manifest does not have required methods BuildRequired()")
 	}
 	required, err := mf.BuildRequired()
 	if err != nil {
-		return false, fmt.Errorf("check if %s requires building from local Dockerfile: %w", workloadType, err)
+		return false, fmt.Errorf("check if manifest requires building from local Dockerfile: %w", err)
 	}
 	return required, nil
 }
@@ -757,4 +600,12 @@ func uint16P(n uint16) *uint16 {
 		return nil
 	}
 	return &n
+}
+
+func placementStringP(p PlacementString) *PlacementString {
+	if p == "" {
+		return nil
+	}
+	placement := p
+	return &placement
 }

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
-	"strings"
 	"testing"
 
 	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
@@ -123,162 +122,6 @@ func TestTemplate_UploadEnvironmentCustomResources(t *testing.T) {
 	}
 }
 
-func TestTemplate_UploadRequestDrivenWebServiceCustomResources(t *testing.T) {
-	mockContent := "hello"
-	testCases := map[string]struct {
-		fs           func() map[string][]byte
-		mockUploader s3.CompressAndUploadFunc
-
-		wantedErr  error
-		wantedURLs map[string]string
-	}{
-		"success": {
-			fs: func() map[string][]byte {
-				m := make(map[string][]byte)
-				for _, file := range rdWkldCustomResourceFiles {
-					m[fmt.Sprintf("templates/custom-resources/%s.js", file)] = []byte(mockContent)
-				}
-				return m
-			},
-			mockUploader: s3.CompressAndUploadFunc(func(key string, files ...s3.NamedBinary) (string, error) {
-				require.Contains(t, key, "scripts")
-				require.Contains(t, key, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-				for _, f := range files {
-					require.Equal(t, mockContent, string(f.Content()))
-				}
-				return "mockURL", nil
-			}),
-			wantedURLs: map[string]string{
-				AppRunnerCustomDomainLambdaFileName: "mockURL",
-			},
-		},
-		"errors if rd web service custom resource file doesn't exist": {
-			fs: func() map[string][]byte {
-				return nil
-			},
-			wantedErr: fmt.Errorf("read template custom-resources/custom-domain-app-runner.js: open templates/custom-resources/custom-domain-app-runner.js: file does not exist"),
-		},
-		"fail to upload": {
-			fs: func() map[string][]byte {
-				m := make(map[string][]byte)
-				for _, file := range rdWkldCustomResourceFiles {
-					m[fmt.Sprintf("templates/custom-resources/%s.js", file)] = []byte(mockContent)
-				}
-				return m
-			},
-			mockUploader: s3.CompressAndUploadFunc(func(key string, files ...s3.NamedBinary) (string, error) {
-				require.Contains(t, key, "scripts")
-				require.Contains(t, key, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-				for _, f := range files {
-					require.Equal(t, mockContent, string(f.Content()))
-				}
-				if strings.Contains(key, "custom-domain-app-runner") {
-					return "", errors.New("some error") // Upload fail on the custom-domain-app-runner.js
-				} else {
-					return "mockURL", nil
-				}
-			}),
-			wantedErr: errors.New("upload scripts/custom-domain-app-runner: some error"),
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			tpl := &Template{
-				fs: &mockReadFileFS{tc.fs()},
-			}
-
-			// WHEN
-			gotURLs, err := tpl.UploadRequestDrivenWebServiceCustomResources(tc.mockUploader)
-
-			if tc.wantedErr != nil {
-				require.EqualError(t, err, tc.wantedErr.Error())
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, len(rdWkldCustomResourceFiles), len(gotURLs))
-				require.Equal(t, tc.wantedURLs, gotURLs)
-			}
-		})
-	}
-}
-
-func TestTemplate_UploadRequestDrivenWebServiceLayers(t *testing.T) {
-	mockContent := "hello"
-	testCases := map[string]struct {
-		fs           func() map[string][]byte
-		mockUploader s3.UploadFunc
-
-		wantedURLs map[string]string
-		wantedErr  error
-	}{
-		"success": {
-			fs: func() map[string][]byte {
-				m := make(map[string][]byte)
-				for _, file := range rdWkldCustomResourceLayers {
-					m[fmt.Sprintf("templates/custom-resources/%s.zip", file)] = []byte(mockContent)
-				}
-				return m
-			},
-			mockUploader: s3.UploadFunc(func(key string, file s3.NamedBinary) (string, error) {
-				require.Contains(t, key, "layers")
-				require.Contains(t, key, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-				require.Equal(t, mockContent, string(file.Content()))
-				return "mockURL", nil
-			}),
-			wantedURLs: map[string]string{
-				"aws-sdk-layer": "mockURL",
-			},
-		},
-		"errors if rd web service custom layer file doesn't exist": {
-			fs: func() map[string][]byte {
-				return nil
-			},
-			wantedErr: fmt.Errorf("read template custom-resources/aws-sdk-layer.zip: open templates/custom-resources/aws-sdk-layer.zip: file does not exist"),
-		},
-		"fail to upload": {
-			fs: func() map[string][]byte {
-				m := make(map[string][]byte)
-				for _, file := range rdWkldCustomResourceLayers {
-					m[fmt.Sprintf("templates/custom-resources/%s.zip", file)] = []byte(mockContent)
-				}
-				return m
-			},
-			mockUploader: s3.UploadFunc(func(key string, file s3.NamedBinary) (string, error) {
-				require.Contains(t, key, "layers")
-				require.Contains(t, key, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824")
-				require.Equal(t, mockContent, string(file.Content()))
-				if strings.Contains(key, "aws-sdk-layer") {
-					return "", errors.New("some error") // Upload fail on the aws-sdk zip.
-				} else {
-					return "mockURL", nil
-				}
-			}),
-			wantedErr: errors.New("upload layers/aws-sdk-layer: some error"),
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			tpl := &Template{
-				fs: &mockReadFileFS{tc.fs()},
-			}
-
-			// WHEN
-			gotURLs, err := tpl.UploadRequestDrivenWebServiceLayers(tc.mockUploader)
-
-			if tc.wantedErr != nil {
-				require.EqualError(t, err, tc.wantedErr.Error())
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, len(rdWkldCustomResourceLayers), len(gotURLs))
-				require.Equal(t, tc.wantedURLs, gotURLs)
-			}
-		})
-	}
-}
-
 func TestTemplate_Parse(t *testing.T) {
 	testCases := map[string]struct {
 		inPath string
@@ -308,7 +151,7 @@ func TestTemplate_Parse(t *testing.T) {
 				"templates/fake/manifest.yml": []byte(`{{.Name}}`),
 			},
 
-			wantedErr: fmt.Errorf("execute template %s with data %v", "/fake/manifest.yml", struct{}{}),
+			wantedErr: fmt.Errorf("execute template %s", "/fake/manifest.yml"),
 		},
 		"valid template": {
 			inPath: "/fake/manifest.yml",

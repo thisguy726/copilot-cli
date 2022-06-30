@@ -10,9 +10,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
-	"strconv"
 	"testing"
-	"time"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 
@@ -23,76 +21,6 @@ import (
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
-
-func TestS3_PutArtifact(t *testing.T) {
-	buf := &bytes.Buffer{}
-	fmt.Fprint(buf, "some data")
-	timeNow := strconv.FormatInt(time.Now().Unix(), 10)
-	testCases := map[string]struct {
-		inBucket            string
-		inFileName          string
-		inData              *bytes.Buffer
-		mockS3ManagerClient func(m *mocks.Mocks3ManagerAPI)
-
-		wantErr  error
-		wantPath string
-	}{
-		"should put artifact to s3 bucket and return the path": {
-			inBucket:   "mockBucket",
-			inData:     buf,
-			inFileName: "my-app.addons.stack.yml",
-			mockS3ManagerClient: func(m *mocks.Mocks3ManagerAPI) {
-				m.EXPECT().Upload(&s3manager.UploadInput{
-					Body:   buf,
-					Bucket: aws.String("mockBucket"),
-					Key:    aws.String(fmt.Sprintf("manual/%s/my-app.addons.stack.yml", timeNow)),
-				}).Return(&s3manager.UploadOutput{
-					Location: fmt.Sprintf("https://mockBucket/manual/%s/my-app.addons.stack.yml", timeNow),
-				}, nil)
-			},
-
-			wantPath: fmt.Sprintf("https://mockBucket/manual/%s/my-app.addons.stack.yml", timeNow),
-		},
-		"should return error if fail to upload": {
-			inBucket:   "mockBucket",
-			inData:     buf,
-			inFileName: "my-app.addons.stack.yml",
-			mockS3ManagerClient: func(m *mocks.Mocks3ManagerAPI) {
-				m.EXPECT().Upload(&s3manager.UploadInput{
-					Body:   buf,
-					Bucket: aws.String("mockBucket"),
-					Key:    aws.String(fmt.Sprintf("manual/%s/my-app.addons.stack.yml", timeNow)),
-				}).Return(nil, errors.New("some error"))
-			},
-
-			wantErr: fmt.Errorf(fmt.Sprintf("put manual/%s/my-app.addons.stack.yml to bucket mockBucket: some error", timeNow)),
-		},
-	}
-
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			ctrl := gomock.NewController(t)
-			defer ctrl.Finish()
-
-			mockS3ManagerClient := mocks.NewMocks3ManagerAPI(ctrl)
-			tc.mockS3ManagerClient(mockS3ManagerClient)
-
-			service := S3{
-				s3Manager: mockS3ManagerClient,
-			}
-
-			gotPath, gotErr := service.PutArtifact(tc.inBucket, tc.inFileName, tc.inData)
-
-			if gotErr != nil {
-				require.EqualError(t, gotErr, tc.wantErr.Error())
-			} else {
-				require.Equal(t, tc.wantPath, gotPath)
-			}
-		})
-
-	}
-}
 
 func TestS3_ZipAndUpload(t *testing.T) {
 	testCases := map[string]struct {
@@ -130,6 +58,7 @@ func TestS3_ZipAndUpload(t *testing.T) {
 					}
 					require.Equal(t, aws.StringValue(in.Bucket), "mockBucket")
 					require.Equal(t, aws.StringValue(in.Key), "mockFileName")
+					require.Equal(t, s3.ObjectCannedACLBucketOwnerFullControl, aws.StringValue(in.ACL))
 				}).Return(&s3manager.UploadOutput{
 					Location: "mockURL",
 				}, nil)
@@ -185,9 +114,10 @@ func TestS3_Upload(t *testing.T) {
 				m.EXPECT().Upload(gomock.Any()).Do(func(in *s3manager.UploadInput, _ ...func(*s3manager.Uploader)) {
 					b, err := ioutil.ReadAll(in.Body)
 					require.NoError(t, err)
-					require.Equal(t, string(b), "bar")
-					require.Equal(t, aws.StringValue(in.Bucket), "mockBucket")
-					require.Equal(t, aws.StringValue(in.Key), "mockFileName")
+					require.Equal(t, "bar", string(b))
+					require.Equal(t, "mockBucket", aws.StringValue(in.Bucket))
+					require.Equal(t, "mockFileName", aws.StringValue(in.Key))
+					require.Equal(t, s3.ObjectCannedACLBucketOwnerFullControl, aws.StringValue(in.ACL))
 				}).Return(&s3manager.UploadOutput{
 					Location: "mockURL",
 				}, nil)
@@ -209,7 +139,7 @@ func TestS3_Upload(t *testing.T) {
 				s3Manager: mockS3ManagerClient,
 			}
 
-			gotURL, gotErr := service.Upload("mockBucket", "mockFileName", namedBinary{})
+			gotURL, gotErr := service.Upload("mockBucket", "mockFileName", bytes.NewBuffer([]byte("bar")))
 
 			if gotErr != nil {
 				require.EqualError(t, gotErr, tc.wantError.Error())
@@ -475,6 +405,62 @@ func TestS3_ParseURL(t *testing.T) {
 				require.Equal(t, gotBucketName, tc.wantedBucketName)
 				require.Equal(t, gotKey, tc.wantedKey)
 			}
+		})
+	}
+}
+
+func TestURL(t *testing.T) {
+	testCases := map[string]struct {
+		region string
+		bucket string
+		key    string
+
+		wanted string
+	}{
+		// See https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-bucket-intro.html#virtual-host-style-url-ex
+		"Formats a virtual-hosted-style URL": {
+			region: "us-west-2",
+			bucket: "mybucket",
+			key:    "puppy.jpg",
+
+			wanted: "https://mybucket.s3.us-west-2.amazonaws.com/puppy.jpg",
+		},
+		"Formats the URL for a region in the aws-cn partition": {
+			region: "cn-north-1",
+			bucket: "mybucket",
+			key:    "puppy.jpg",
+
+			wanted: "https://mybucket.s3.cn-north-1.amazonaws.cn/puppy.jpg",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.wanted, URL(tc.region, tc.bucket, tc.key))
+		})
+	}
+}
+
+func TestS3_FormatARN(t *testing.T) {
+	testCases := map[string]struct {
+		inPartition string
+		inLocation  string
+
+		wantedARN string
+	}{
+		"success": {
+			inPartition: "aws",
+			inLocation:  "stackset-demo-infrastruc-pipelinebuiltartifactbuc-11dj7ctf52wyf/manual/1638391936/env",
+
+			wantedARN: "arn:aws:s3:::stackset-demo-infrastruc-pipelinebuiltartifactbuc-11dj7ctf52wyf/manual/1638391936/env",
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			gotARN := FormatARN(tc.inPartition, tc.inLocation)
+
+			require.Equal(t, gotARN, tc.wantedARN)
 		})
 	}
 }

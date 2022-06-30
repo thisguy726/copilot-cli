@@ -7,9 +7,13 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"strings"
 	"text/tabwriter"
 
+	"github.com/aws/aws-sdk-go/aws"
+
+	"github.com/aws/copilot-cli/internal/pkg/aws/apprunner"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
@@ -21,37 +25,46 @@ type RDWebServiceDescriber struct {
 	svc             string
 	enableResources bool
 
-	store                DeployedEnvServicesLister
-	envSvcDescribers     map[string]apprunnerSvcDescriber
-	initServiceDescriber func(string) error
+	store                  DeployedEnvServicesLister
+	initAppRunnerDescriber func(string) (apprunnerDescriber, error)
+	envSvcDescribers       map[string]apprunnerDescriber
 }
 
 // NewRDWebServiceDescriber instantiates a request-driven service describer.
 func NewRDWebServiceDescriber(opt NewServiceConfig) (*RDWebServiceDescriber, error) {
 	describer := &RDWebServiceDescriber{
-		app:              opt.App,
-		svc:              opt.Svc,
-		enableResources:  opt.EnableResources,
-		store:            opt.DeployStore,
-		envSvcDescribers: make(map[string]apprunnerSvcDescriber),
+		app:             opt.App,
+		svc:             opt.Svc,
+		enableResources: opt.EnableResources,
+		store:           opt.DeployStore,
+
+		envSvcDescribers: make(map[string]apprunnerDescriber),
 	}
-	describer.initServiceDescriber = func(env string) error {
-		if _, ok := describer.envSvcDescribers[env]; ok {
-			return nil
+	describer.initAppRunnerDescriber = func(env string) (apprunnerDescriber, error) {
+		if describer, ok := describer.envSvcDescribers[env]; ok {
+			return describer, nil
 		}
-		d, err := NewAppRunnerServiceDescriber(NewServiceConfig{
+		d, err := newAppRunnerServiceDescriber(NewServiceConfig{
 			App:         opt.App,
-			Env:         env,
 			Svc:         opt.Svc,
 			ConfigStore: opt.ConfigStore,
-		})
+		}, env)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		describer.envSvcDescribers[env] = d
-		return nil
+		return d, nil
 	}
 	return describer, nil
+}
+
+// ServiceARN retrieves the ARN of the app runner service.
+func (d *RDWebServiceDescriber) ServiceARN(env string) (string, error) {
+	describer, err := d.initAppRunnerDescriber(env)
+	if err != nil {
+		return "", err
+	}
+	return describer.ServiceARN()
 }
 
 // Describe returns info for a request-driven web service.
@@ -61,21 +74,20 @@ func (d *RDWebServiceDescriber) Describe() (HumanJSONStringer, error) {
 		return nil, fmt.Errorf("list deployed environments for application %s: %w", d.app, err)
 	}
 
+	var observabilities []observabilityInEnv
 	var routes []*WebServiceRoute
 	var configs []*ServiceConfig
 	var envVars envVars
 	resources := make(map[string][]*stack.Resource)
 	for _, env := range environments {
-		err := d.initServiceDescriber(env)
+		describer, err := d.initAppRunnerDescriber(env)
 		if err != nil {
 			return nil, err
 		}
-
-		service, err := d.envSvcDescribers[env].Service()
+		service, err := describer.Service()
 		if err != nil {
 			return nil, fmt.Errorf("retrieve service configuration: %w", err)
 		}
-
 		webServiceURI := formatAppRunnerUrl(service.ServiceURL)
 		routes = append(routes, &WebServiceRoute{
 			Environment: env,
@@ -87,7 +99,6 @@ func (d *RDWebServiceDescriber) Describe() (HumanJSONStringer, error) {
 			CPU:         service.CPU,
 			Memory:      service.Memory,
 		})
-
 		for _, v := range service.EnvironmentVariables {
 			envVars = append(envVars, &envVar{
 				Environment: env,
@@ -95,9 +106,12 @@ func (d *RDWebServiceDescriber) Describe() (HumanJSONStringer, error) {
 				Value:       v.Value,
 			})
 		}
-
+		observabilities = append(observabilities, observabilityInEnv{
+			Environment: env,
+			Tracing:     formatTracingConfiguration(service.Observability.TraceConfiguration),
+		})
 		if d.enableResources {
-			stackResources, err := d.envSvcDescribers[env].ServiceStackResources()
+			stackResources, err := describer.ServiceStackResources()
 			if err != nil {
 				return nil, fmt.Errorf("retrieve service resources: %w", err)
 			}
@@ -105,28 +119,83 @@ func (d *RDWebServiceDescriber) Describe() (HumanJSONStringer, error) {
 		}
 	}
 
+	if !observabilityPerEnv(observabilities).hasObservabilityConfiguration() {
+		observabilities = nil
+	}
 	return &rdWebSvcDesc{
-		Service:        d.svc,
-		Type:           manifest.RequestDrivenWebServiceType,
-		App:            d.app,
-		Configurations: configs,
-		Routes:         routes,
-		Variables:      envVars,
-		Resources:      resources,
+		Service:                 d.svc,
+		Type:                    manifest.RequestDrivenWebServiceType,
+		App:                     d.app,
+		AppRunnerConfigurations: configs,
+		Routes:                  routes,
+		Variables:               envVars,
+		Resources:               resources,
+		Observability:           observabilities,
 
 		environments: environments,
 	}, nil
 }
 
+func formatTracingConfiguration(configuration *apprunner.TraceConfiguration) *tracing {
+	if configuration == nil {
+		return nil
+	}
+	return &tracing{
+		Vendor: aws.StringValue(configuration.Vendor),
+	}
+}
+
+type observabilityPerEnv []observabilityInEnv
+
+func (obs observabilityPerEnv) hasObservabilityConfiguration() bool {
+	for _, envObservabilityConfig := range obs {
+		if !envObservabilityConfig.isEmpty() {
+			return true
+		}
+	}
+	return false
+}
+
+func (obs observabilityPerEnv) humanString(w io.Writer) {
+	headers := []string{"Environment", "Tracing"}
+	var rows [][]string
+	for _, ob := range obs {
+		tracingVendor := "None"
+		if ob.Tracing != nil && ob.Tracing.Vendor != "" {
+			tracingVendor = ob.Tracing.Vendor
+		}
+		rows = append(rows, []string{ob.Environment, tracingVendor})
+	}
+	printTable(w, headers, rows)
+}
+
+type observabilityInEnv struct {
+	Environment string   `json:"environment"`
+	Tracing     *tracing `json:"tracing,omitempty"`
+}
+
+func (o observabilityInEnv) isEmpty() bool {
+	return o.Tracing.isEmpty()
+}
+
+type tracing struct {
+	Vendor string `json:"vendor"`
+}
+
+func (t *tracing) isEmpty() bool {
+	return t == nil || t.Vendor == ""
+}
+
 // rdWebSvcDesc contains serialized parameters for a web service.
 type rdWebSvcDesc struct {
-	Service        string               `json:"service"`
-	Type           string               `json:"type"`
-	App            string               `json:"application"`
-	Configurations configurations       `json:"configurations"`
-	Routes         []*WebServiceRoute   `json:"routes"`
-	Variables      envVars              `json:"variables"`
-	Resources      deployedSvcResources `json:"resources,omitempty"`
+	Service                 string                  `json:"service"`
+	Type                    string                  `json:"type"`
+	App                     string                  `json:"application"`
+	AppRunnerConfigurations appRunnerConfigurations `json:"configurations"`
+	Routes                  []*WebServiceRoute      `json:"routes"`
+	Variables               envVars                 `json:"variables"`
+	Resources               deployedSvcResources    `json:"resources,omitempty"`
+	Observability           observabilityPerEnv     `json:"observability,omitempty"`
 
 	environments []string `json:"-"`
 }
@@ -151,7 +220,12 @@ func (w *rdWebSvcDesc) HumanString() string {
 	fmt.Fprintf(writer, "  %s\t%s\n", "Type", w.Type)
 	fmt.Fprint(writer, color.Bold.Sprint("\nConfigurations\n\n"))
 	writer.Flush()
-	w.Configurations.humanString(writer)
+	w.AppRunnerConfigurations.humanString(writer)
+	if w.Observability.hasObservabilityConfiguration() {
+		fmt.Fprint(writer, color.Bold.Sprint("\nObservability\n\n"))
+		writer.Flush()
+		w.Observability.humanString(writer)
+	}
 	fmt.Fprint(writer, color.Bold.Sprint("\nRoutes\n\n"))
 	writer.Flush()
 	headers := []string{"Environment", "URL"}

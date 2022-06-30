@@ -1,5 +1,5 @@
 # pipeline ls
-```bash
+```console
 $ copilot pipeline ls [flags]
 ```
 
@@ -7,14 +7,15 @@ $ copilot pipeline ls [flags]
 `copilot pipeline ls` lists all the deployed pipelines in an application.
 
 ## What are the flags?
-```bash
+```
 -a, --app string   Name of the application.
 -h, --help         help for ls
     --json         Optional. Outputs in JSON format.
+    --local        Only show pipelines in the workspace.
 ```
 
 ## Examples
 Lists all the pipelines for the "phonetool" application.
-```bash
+```console
 $ copilot pipeline ls -a phonetool
 ```

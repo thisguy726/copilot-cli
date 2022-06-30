@@ -25,14 +25,17 @@ type BackendService struct {
 
 // BackendServiceConfig holds the configuration that can be overridden per environments.
 type BackendServiceConfig struct {
-	ImageConfig      ImageWithPortAndHealthcheck `yaml:"image,flow"`
+	ImageConfig      ImageWithHealthcheckAndOptionalPort `yaml:"image,flow"`
 	ImageOverride    `yaml:",inline"`
+	RoutingRule      RoutingRuleConfiguration `yaml:"http,flow"`
 	TaskConfig       `yaml:",inline"`
-	Logging          `yaml:"logging,flow"`
+	Logging          Logging                   `yaml:"logging,flow"`
 	Sidecars         map[string]*SidecarConfig `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
 	Network          NetworkConfig             `yaml:"network"`
 	PublishConfig    PublishConfig             `yaml:"publish"`
 	TaskDefOverrides []OverrideRule            `yaml:"taskdef_overrides"`
+	DeployConfig     DeploymentConfiguration   `yaml:"deployment"`
+	Observability    Observability             `yaml:"observability"`
 }
 
 // BackendServiceProps represents the configuration needed to create a backend service.
@@ -54,6 +57,10 @@ func NewBackendService(props BackendServiceProps) *BackendService {
 	svc.BackendServiceConfig.ImageConfig.Port = uint16P(props.Port)
 	svc.BackendServiceConfig.ImageConfig.HealthCheck = props.HealthCheck
 	svc.BackendServiceConfig.Platform = props.Platform
+	if isWindowsPlatform(props.Platform) {
+		svc.BackendServiceConfig.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
+		svc.BackendServiceConfig.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
+	}
 	svc.parser = template.New()
 	return svc
 }
@@ -69,6 +76,17 @@ func (s *BackendService) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	return content.Bytes(), nil
+}
+
+// RequiredEnvironmentFeatures returns environment features that are required for this manifest.
+func (s *BackendService) RequiredEnvironmentFeatures() []string {
+	var features []string
+	if !s.RoutingRule.IsEmpty() {
+		features = append(features, template.InternalALBFeatureName)
+	}
+	features = append(features, s.Network.requiredEnvFeatures()...)
+	features = append(features, s.Storage.requiredEnvFeatures()...)
+	return features
 }
 
 // Port returns the exposed the exposed port in the manifest.
@@ -94,6 +112,11 @@ func (s *BackendService) BuildRequired() (bool, error) {
 // BuildArgs returns a docker.BuildArguments object for the service given a workspace root directory.
 func (s *BackendService) BuildArgs(wsRoot string) *DockerBuildArgs {
 	return s.ImageConfig.Image.BuildConfig(wsRoot)
+}
+
+// EnvFile returns the location of the env file against the ws root directory.
+func (s *BackendService) EnvFile() string {
+	return aws.StringValue(s.TaskConfig.EnvFile)
 }
 
 // ApplyEnv returns the service manifest with environment overrides.
@@ -128,7 +151,7 @@ func newDefaultBackendService() *BackendService {
 			Type: aws.String(BackendServiceType),
 		},
 		BackendServiceConfig: BackendServiceConfig{
-			ImageConfig: ImageWithPortAndHealthcheck{},
+			ImageConfig: ImageWithHealthcheckAndOptionalPort{},
 			TaskConfig: TaskConfig{
 				CPU:    aws.Int(256),
 				Memory: aws.Int(512),
@@ -144,7 +167,9 @@ func newDefaultBackendService() *BackendService {
 			},
 			Network: NetworkConfig{
 				VPC: vpcConfig{
-					Placement: &PublicSubnetPlacement,
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PublicSubnetPlacement),
+					},
 				},
 			},
 		},

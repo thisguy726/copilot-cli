@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package manifest provides functionality to create Manifest files.
 package manifest
 
 import (
@@ -19,9 +18,11 @@ const (
 	scheduledJobManifestPath = "workloads/jobs/scheduled-job/manifest.yml"
 )
 
-// JobTypes holds the valid job "architectures"
-var JobTypes = []string{
-	ScheduledJobType,
+// JobTypes returns the list of supported job manifest types.
+func JobTypes() []string {
+	return []string{
+		ScheduledJobType,
+	}
 }
 
 // ScheduledJob holds the configuration to build a container image that is run
@@ -39,7 +40,7 @@ type ScheduledJobConfig struct {
 	ImageConfig             ImageWithHealthcheck `yaml:"image,flow"`
 	ImageOverride           `yaml:",inline"`
 	TaskConfig              `yaml:",inline"`
-	Logging                 `yaml:"logging,flow"`
+	Logging                 Logging                   `yaml:"logging,flow"`
 	Sidecars                map[string]*SidecarConfig `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
 	On                      JobTriggerConfig          `yaml:"on,flow"`
 	JobFailureHandlerConfig `yaml:",inline"`
@@ -77,12 +78,16 @@ func NewScheduledJob(props *ScheduledJobProps) *ScheduledJob {
 	job.ImageConfig.Image.Build.BuildArgs.Dockerfile = stringP(props.Dockerfile)
 	job.ImageConfig.Image.Location = stringP(props.Image)
 	job.ImageConfig.HealthCheck = props.HealthCheck
+	job.Platform = props.Platform
+	if isWindowsPlatform(props.Platform) {
+		job.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
+		job.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
+	}
 	job.On.Schedule = stringP(props.Schedule)
 	if props.Retries != 0 {
 		job.Retries = aws.Int(props.Retries)
 	}
 	job.Timeout = stringP(props.Timeout)
-	job.Platform = props.Platform
 	job.parser = template.New()
 	return job
 }
@@ -117,6 +122,14 @@ func (j ScheduledJob) ApplyEnv(envName string) (WorkloadManifest, error) {
 	return &j, nil
 }
 
+// RequiredEnvironmentFeatures returns environment features that are required for this manfiest.
+func (s *ScheduledJob) RequiredEnvironmentFeatures() []string {
+	var features []string
+	features = append(features, s.Network.requiredEnvFeatures()...)
+	features = append(features, s.Storage.requiredEnvFeatures()...)
+	return features
+}
+
 // Publish returns the list of topics where notifications can be published.
 func (j *ScheduledJob) Publish() []Topic {
 	return j.ScheduledJobConfig.PublishConfig.Topics
@@ -132,9 +145,9 @@ func (j *ScheduledJob) BuildRequired() (bool, error) {
 	return requiresBuild(j.ImageConfig.Image)
 }
 
-// JobDockerfileBuildRequired returns if the job container image should be built from local Dockerfile.
-func JobDockerfileBuildRequired(job interface{}) (bool, error) {
-	return dockerfileBuildRequired("job", job)
+// EnvFile returns the location of the env file against the ws root directory.
+func (j *ScheduledJob) EnvFile() string {
+	return aws.StringValue(j.TaskConfig.EnvFile)
 }
 
 // newDefaultScheduledJob returns an empty ScheduledJob with only the default values set.
@@ -157,7 +170,9 @@ func newDefaultScheduledJob() *ScheduledJob {
 			},
 			Network: NetworkConfig{
 				VPC: vpcConfig{
-					Placement: &PublicSubnetPlacement,
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PublicSubnetPlacement),
+					},
 				},
 			},
 		},

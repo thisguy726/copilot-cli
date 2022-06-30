@@ -33,6 +33,15 @@ cpu: {{.InstanceConfig.CPU}}
 # Amount of memory in MiB used by the task.
 memory: {{.InstanceConfig.Memory}}
 
+# # Connect your App Runner service to your environment's VPC.
+# network:
+#   vpc:
+#     placement: private
+
+# Enable tracing for the service.
+# observability:
+#   tracing: awsxray
+
 # Optional fields for more advanced use-cases.
 #
 # variables:                    # Pass environment variables as key value pairs.

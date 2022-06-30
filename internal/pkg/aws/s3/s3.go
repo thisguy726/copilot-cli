@@ -9,10 +9,9 @@ import (
 	"bytes"
 	"fmt"
 	"io"
-	"path"
-	"strconv"
 	"strings"
-	"time"
+
+	"github.com/aws/aws-sdk-go/aws/endpoints"
 
 	"github.com/aws/aws-sdk-go/aws/awserr"
 
@@ -22,10 +21,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 )
 
-const (
-	artifactDirName = "manual"
-	notFound        = "NotFound"
-)
+const notFound = "NotFound"
 
 type s3ManagerAPI interface {
 	Upload(input *s3manager.UploadInput, options ...func(*s3manager.Uploader)) (*s3manager.UploadOutput, error)
@@ -46,9 +42,6 @@ type NamedBinary interface {
 // CompressAndUploadFunc is invoked to zip multiple template contents and upload them to an S3 bucket under the specified key.
 type CompressAndUploadFunc func(key string, objects ...NamedBinary) (url string, err error)
 
-// UploadFunc is invoked to upload an item to an S3 bucket under the specified key.
-type UploadFunc func(key string, file NamedBinary) (string, error)
-
 // S3 wraps an Amazon Simple Storage Service client.
 type S3 struct {
 	s3Manager s3ManagerAPI
@@ -63,24 +56,9 @@ func New(s *session.Session) *S3 {
 	}
 }
 
-// PutArtifact uploads data to a S3 bucket under a random path that ends with
-// the file name and returns its url.
-func (s *S3) PutArtifact(bucket, fileName string, data io.Reader) (string, error) {
-	id := time.Now().Unix()
-	key := path.Join(artifactDirName, strconv.FormatInt(id, 10), fileName)
-	resp, err := s.s3Manager.Upload(&s3manager.UploadInput{
-		Body:   data,
-		Bucket: aws.String(bucket),
-		Key:    aws.String(key),
-	})
-	if err != nil {
-		return "", fmt.Errorf("put %s to bucket %s: %w", key, bucket, err)
-	}
-
-	return resp.Location, nil
-}
-
 // ZipAndUpload zips all files and uploads the zipped file to an S3 bucket under the specified key.
+// Per s3's recommendation https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html:
+// The bucket owner, in addition to the object owner, is granted full control.
 func (s *S3) ZipAndUpload(bucket, key string, files ...NamedBinary) (string, error) {
 	buf := new(bytes.Buffer)
 	w := zip.NewWriter(buf)
@@ -101,10 +79,10 @@ func (s *S3) ZipAndUpload(bucket, key string, files ...NamedBinary) (string, err
 }
 
 // Upload uploads a file to an S3 bucket under the specified key.
-func (s *S3) Upload(bucket, key string, file NamedBinary) (string, error) {
-	buf := new(bytes.Buffer)
-	buf.Write(file.Content())
-	return s.upload(bucket, key, buf)
+// Per s3's recommendation https://docs.aws.amazon.com/AmazonS3/latest/userguide/about-object-ownership.html:
+// The bucket owner, in addition to the object owner, is granted full control.
+func (s *S3) Upload(bucket, key string, data io.Reader) (string, error) {
+	return s.upload(bucket, key, data)
 }
 
 // EmptyBucket deletes all objects within the bucket.
@@ -179,6 +157,25 @@ func ParseURL(url string) (bucket string, key string, err error) {
 	return
 }
 
+// URL returns a virtual-hosted–style S3 url for the object stored at key in a bucket created in the specified region.
+func URL(region, bucket, key string) string {
+	tld := "com"
+	for cn := range endpoints.AwsCnPartition().Regions() {
+		if cn == region {
+			tld = "cn"
+			break
+		}
+	}
+
+	return fmt.Sprintf("https://%s.s3.%s.amazonaws.%s/%s", bucket, region, tld, key)
+}
+
+// FormatARN formats an S3 object ARN.
+// For example: arn:aws:s3:::stackset-myapp-infrastru-pipelinebuiltartifactbuc-1nk5t9zkymh8r.s3-us-west-2.amazonaws.com/scripts/dns-cert-validator/dd2278811c3
+func FormatARN(partition, location string) string {
+	return fmt.Sprintf("arn:%s:s3:::%s", partition, location)
+}
+
 // Check whether the bucket exists before proceeding with empty the bucket
 func (s *S3) isBucketExists(bucket string) (bool, error) {
 	input := &s3.HeadBucketInput{
@@ -196,11 +193,13 @@ func (s *S3) isBucketExists(bucket string) (bool, error) {
 }
 
 func (s *S3) upload(bucket, key string, buf io.Reader) (string, error) {
-	resp, err := s.s3Manager.Upload(&s3manager.UploadInput{
+	in := &s3manager.UploadInput{
 		Body:   buf,
 		Bucket: aws.String(bucket),
 		Key:    aws.String(key),
-	})
+		ACL:    aws.String(s3.ObjectCannedACLBucketOwnerFullControl),
+	}
+	resp, err := s.s3Manager.Upload(in)
 	if err != nil {
 		return "", fmt.Errorf("upload %s to bucket %s: %w", key, bucket, err)
 	}

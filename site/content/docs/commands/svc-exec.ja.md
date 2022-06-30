@@ -1,5 +1,5 @@
 # svc exec
-```
+```console
 $ copilot svc exec
 ```
 
@@ -22,13 +22,13 @@ $ copilot svc exec
 
 "frontend" Service のタスクにインタラクティブなセッションを開始します。
 
-```bash
+```console
 $ copilot svc exec -a my-app -e test -n frontend
 ```
 
 "backend" Service 内の ID "8c38184" から始まるタスクで 'ls' コマンドを実行します。
 
-```bash
+```console
 $ copilot svc exec -a my-app -e test --name backend --task-id 8c38184 --command "ls"
 ```
 
@@ -39,3 +39,4 @@ $ copilot svc exec -a my-app -e test --name backend --task-id 8c38184 --command 
 !!! info
     1. Service デプロイ前に Manifest で `exec: true` が設定されていることを確認してください。
     2. これにより Service の Fargate Platform Version が 1.4.0 にアップデートされますのでご注意ください。プラットフォームバージョンをアップデートすると、[ECS サービスのリプレイス](https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ecs-service.html#cfn-ecs-service-platformversion)となり、サービスのダウンタイムが発生します。
+    3. `exec` は Windows コンテナではサポートされていません。

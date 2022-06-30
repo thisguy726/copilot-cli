@@ -1,4 +1,6 @@
 DynamicDesiredCountAction:
+  Metadata:
+    'aws:copilot:description': "A custom resource returning the ECS service's running task count"
   Type: Custom::DynamicDesiredCountFunction
   Properties:
     ServiceToken: !GetAtt DynamicDesiredCountFunction.Arn
@@ -15,16 +17,66 @@ DynamicDesiredCountAction:
 DynamicDesiredCountFunction:
   Type: AWS::Lambda::Function
   Properties:
+    {{- with $cr := index .CustomResources "DynamicDesiredCountFunction" }}
     Code:
-      ZipFile: |
-        {{.DesiredCountLambda}}
+      S3Bucket: {{$cr.Bucket}}
+      S3Key: {{$cr.Key}}
+    {{- end }}
     Handler: "index.handler"
     Timeout: 600
     MemorySize: 512
-    Role: !GetAtt 'CustomResourceRole.Arn'
+    Role: !GetAtt 'DynamicDesiredCountFunctionRole.Arn'
     Runtime: nodejs12.x
 
+DynamicDesiredCountFunctionRole:
+  Metadata:
+    'aws:copilot:description': "An IAM Role for describing number of running tasks in your ECS service"
+  Type: AWS::IAM::Role
+  Properties:
+    AssumeRolePolicyDocument:
+      Version: 2012-10-17
+      Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+              - lambda.amazonaws.com
+          Action:
+            - sts:AssumeRole
+    Path: /
+    ManagedPolicyArns:
+      - !Sub arn:${AWS::Partition}:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Policies:
+      - PolicyName: "DelegateDesiredCountAccess"
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: ECS
+              Effect: Allow
+              Action:
+                - ecs:DescribeServices
+              Resource: "*"
+              Condition: 
+                ArnEquals: 
+                  'ecs:cluster':
+                    Fn::Sub:
+                      - arn:${AWS::Partition}:ecs:${AWS::Region}:${AWS::AccountId}:cluster/${ClusterName}
+                      - ClusterName:
+                          Fn::ImportValue:
+                            !Sub '${AppName}-${EnvName}-ClusterId'
+            - Sid: ResourceGroups
+              Effect: Allow
+              Action:
+                - resource-groups:GetResources
+              Resource: "*"
+            - Sid: Tags
+              Effect: Allow
+              Action:
+                - "tag:GetResources"
+              Resource: "*"
+
 AutoScalingRole:
+  Metadata:
+    'aws:copilot:description': 'An IAM role for container auto scaling'
   Type: AWS::IAM::Role
   Properties:
     AssumeRolePolicyDocument:
@@ -63,8 +115,16 @@ AutoScalingPolicyECSServiceAverageCPUUtilization:
     TargetTrackingScalingPolicyConfiguration:
       PredefinedMetricSpecification:
         PredefinedMetricType: ECSServiceAverageCPUUtilization
+      {{- if .Autoscaling.CPUCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{.Autoscaling.CPUCooldown.ScaleInCooldown}}
+      {{- else}}
       ScaleInCooldown: 120
+      {{- end}}
+      {{- if .Autoscaling.CPUCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{.Autoscaling.CPUCooldown.ScaleOutCooldown}}
+      {{- else}}
       ScaleOutCooldown: 60
+      {{- end}}
       TargetValue: {{.Autoscaling.CPU}}
 {{- end}}
 {{if .Autoscaling.Memory}}
@@ -77,11 +137,19 @@ AutoScalingPolicyECSServiceAverageMemoryUtilization:
     TargetTrackingScalingPolicyConfiguration:
       PredefinedMetricSpecification:
         PredefinedMetricType: ECSServiceAverageMemoryUtilization
+      {{- if .Autoscaling.MemCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{.Autoscaling.MemCooldown.ScaleInCooldown}}
+      {{- else}}
       ScaleInCooldown: 120
+      {{- end}}
+      {{- if .Autoscaling.MemCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{.Autoscaling.MemCooldown.ScaleOutCooldown}}
+      {{- else}}
       ScaleOutCooldown: 60
+      {{- end}}
       TargetValue: {{.Autoscaling.Memory}}
 {{- end}}
-{{- if (and .Subscribe .Autoscaling.QueueDelay) }}
+{{- if .Autoscaling.QueueDelay }}
 BacklogPerTaskCalculatorLogGroup:
   Type: AWS::Logs::LogGroup
   Properties:
@@ -98,9 +166,11 @@ BacklogPerTaskCalculatorFunction:
     'aws:copilot:description': "A Lambda function to emit BacklogPerTask metrics to CloudWatch"
   Type: AWS::Lambda::Function
   Properties:
+    {{- with $cr := index .CustomResources "BacklogPerTaskCalculatorFunction" }}
     Code:
-      ZipFile: |
-        {{.BacklogPerTaskCalculatorLambda}}
+      S3Bucket: {{$cr.Bucket}}
+      S3Key: {{$cr.Key}}
+    {{- end }}
     Handler: "index.handler"
     Timeout: 600
     MemorySize: 512
@@ -117,13 +187,17 @@ BacklogPerTaskCalculatorFunction:
           Fn::Join:
             - ','
             - - !GetAtt EventsQueue.QueueName
+            {{- if .Subscribe }}
             {{- range $topic := .Subscribe.Topics }}
             {{- if $topic.Queue }}
               - !GetAtt {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue.QueueName
             {{- end }}
             {{- end }}
+            {{- end }}
 
 BacklogPerTaskCalculatorRole:
+  Metadata:
+    'aws:copilot:description': 'An IAM role for BacklogPerTaskCalculatorFunction'
   Type: AWS::IAM::Role
   Properties:
     AssumeRolePolicyDocument:
@@ -161,9 +235,11 @@ BacklogPerTaskCalculatorRole:
                 - sqs:GetQueueUrl
               Resource:
                 - !GetAtt EventsQueue.Arn
+                {{- if .Subscribe }}
                 {{- range $topic := .Subscribe.Topics}}
                 {{- if $topic.Queue}}
                 - !GetAtt {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue.Arn
+                {{- end }}
                 {{- end }}
                 {{- end }}
     ManagedPolicyArns:
@@ -191,6 +267,7 @@ PermissionToInvokeBacklogPerTaskCalculatorLambda:
     SourceArn: !GetAtt BacklogPerTaskScheduledRule.Arn
 
 {{- $acceptableBacklog := .Autoscaling.QueueDelay.AcceptableBacklogPerTask }}
+{{- $queueDelayCooldown := .Autoscaling.QueueDelayCooldown }}
 
 AutoScalingPolicyEventsQueue:
   Metadata:
@@ -201,8 +278,16 @@ AutoScalingPolicyEventsQueue:
     PolicyType: TargetTrackingScaling
     ScalingTargetId: !Ref AutoScalingTarget
     TargetTrackingScalingPolicyConfiguration:
+      {{- if $queueDelayCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{$queueDelayCooldown.ScaleInCooldown}}
+      {{- else}}
       ScaleInCooldown: 120
+      {{- end}}
+      {{- if $queueDelayCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{$queueDelayCooldown.ScaleOutCooldown}}
+      {{- else}}
       ScaleOutCooldown: 60
+      {{- end}}
       CustomizedMetricSpecification:
         Namespace: !Sub '${AppName}-${EnvName}-${WorkloadName}'
         MetricName: BacklogPerTask
@@ -213,6 +298,7 @@ AutoScalingPolicyEventsQueue:
         Unit: Count
       TargetValue: {{$acceptableBacklog}}
 
+{{- if .Subscribe }}
 {{- range $topic := .Subscribe.Topics}}
 {{- if $topic.Queue}}
 AutoScalingPolicy{{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue:
@@ -224,8 +310,16 @@ AutoScalingPolicy{{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}Ev
     PolicyType: TargetTrackingScaling
     ScalingTargetId: !Ref AutoScalingTarget
     TargetTrackingScalingPolicyConfiguration:
+      {{- if $queueDelayCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{$queueDelayCooldown.ScaleInCooldown}}
+      {{- else}}
       ScaleInCooldown: 120
+      {{- end}}
+      {{- if $queueDelayCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{$queueDelayCooldown.ScaleOutCooldown}}
+      {{- else}}
       ScaleOutCooldown: 60
+      {{- end}}
       CustomizedMetricSpecification:
         Namespace: !Sub '${AppName}-${EnvName}-${WorkloadName}'
         MetricName: BacklogPerTask
@@ -235,7 +329,76 @@ AutoScalingPolicy{{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}Ev
             Value: !GetAtt {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue.QueueName
         Unit: Count
       TargetValue: {{$acceptableBacklog}}
-{{- end }}{{/* range $topic := .Subscribe.Topics */}}
 {{- end }}{{/* if $topic.Queue */}}
+{{- end }}{{/* range $topic := .Subscribe.Topics */}}
+{{- end }}{{/* if .Subscribe */}}
 
-{{- end }}{{/* if (and .Subscribe .Autoscaling.QueueDelay) */}}
+{{- end }}{{/* if .Autoscaling.QueueDelay */}}
+
+{{- if .Autoscaling.Requests}}
+AutoScalingPolicyALBSumRequestCountPerTarget:
+  Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  Properties:
+    PolicyName: !Join ['-', [!Ref WorkloadName, ALBSumRequestCountPerTarget, ScalingPolicy]]
+    PolicyType: TargetTrackingScaling
+    ScalingTargetId: !Ref AutoScalingTarget
+    TargetTrackingScalingPolicyConfiguration:
+      CustomizedMetricSpecification:
+        Dimensions:
+          - Name: LoadBalancer
+            {{- if eq .WorkloadType "Backend Service"}}
+            Value: !GetAtt EnvControllerAction.InternalLoadBalancerFullName
+            {{- else}}
+            Value: !GetAtt EnvControllerAction.PublicLoadBalancerFullName
+            {{- end}}
+          - Name: TargetGroup
+            Value: !GetAtt TargetGroup.TargetGroupFullName
+        MetricName: RequestCountPerTarget
+        Namespace: AWS/ApplicationELB
+        Statistic: Sum
+      {{- if .Autoscaling.ReqCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{.Autoscaling.ReqCooldown.ScaleInCooldown}}
+      {{- else}}
+      ScaleInCooldown: 120
+      {{- end}}
+      {{- if .Autoscaling.ReqCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{.Autoscaling.ReqCooldown.ScaleOutCooldown}}
+      {{- else}}
+      ScaleOutCooldown: 60
+      {{- end}}
+      TargetValue: {{.Autoscaling.Requests}}
+{{- end}}
+
+{{- if .Autoscaling.ResponseTime}}
+AutoScalingPolicyALBAverageResponseTime:
+  Type: AWS::ApplicationAutoScaling::ScalingPolicy
+  Properties:
+    PolicyName: !Join ['-', [!Ref WorkloadName, ALBAverageResponseTime, ScalingPolicy]]
+    PolicyType: TargetTrackingScaling
+    ScalingTargetId: !Ref AutoScalingTarget
+    TargetTrackingScalingPolicyConfiguration:
+      CustomizedMetricSpecification:
+        Dimensions:
+          - Name: LoadBalancer
+            {{- if eq .WorkloadType "Backend Service"}}
+            Value: !GetAtt EnvControllerAction.InternalLoadBalancerFullName
+            {{- else}}
+            Value: !GetAtt EnvControllerAction.PublicLoadBalancerFullName
+            {{- end}}
+          - Name: TargetGroup
+            Value: !GetAtt TargetGroup.TargetGroupFullName
+        MetricName: TargetResponseTime
+        Namespace: AWS/ApplicationELB
+        Statistic: Average
+      {{- if .Autoscaling.RespTimeCooldown.ScaleInCooldown}}
+      ScaleInCooldown: {{.Autoscaling.RespTimeCooldown.ScaleInCooldown}}
+      {{- else}}
+      ScaleInCooldown: 120
+      {{- end}}
+      {{- if .Autoscaling.RespTimeCooldown.ScaleOutCooldown}}
+      ScaleOutCooldown: {{.Autoscaling.RespTimeCooldown.ScaleOutCooldown}}
+      {{- else}}
+      ScaleOutCooldown: 60
+      {{- end}}
+      TargetValue: {{.Autoscaling.ResponseTime}}
+{{- end}}

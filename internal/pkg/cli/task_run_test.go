@@ -50,8 +50,9 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 
 		inName string
 
-		inImage          string
-		inDockerfilePath string
+		inImage                 string
+		inDockerfilePath        string
+		inDockerfileContextPath string
 
 		inTaskRole string
 
@@ -64,6 +65,8 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 		inSecrets    map[string]string
 		inCommand    string
 		inEntryPoint string
+		inOS         string
+		inArch       string
 
 		inDefault               bool
 		inGenerateCommandTarget string
@@ -137,6 +140,32 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 			},
 			wantedError: nil,
 		},
+		"invalid with os but not arch": {
+			basicOpts:   defaultOpts,
+			inOS:        "WINDOWS_SERVER_2019_CORE",
+			wantedError: errors.New("must specify either both `--platform-os` and `--platform-arch` or neither"),
+		},
+		"invalid with arch but not os": {
+			basicOpts:   defaultOpts,
+			inArch:      "X86_64",
+			wantedError: errors.New("must specify either both `--platform-os` and `--platform-arch` or neither"),
+		},
+		"invalid platform": {
+			basicOpts:   defaultOpts,
+			inOS:        "OStrich",
+			inArch:      "MAD666",
+			wantedError: errors.New("platform OSTRICH/MAD666 is invalid; valid platforms are: WINDOWS_SERVER_2019_CORE/X86_64, WINDOWS_SERVER_2019_FULL/X86_64, LINUX/X86_64 and LINUX/ARM64"),
+		},
+		"uppercase any lowercase before validating": {
+			basicOpts: basicOpts{
+				inCount:  1,
+				inCPU:    1024,
+				inMemory: 2048,
+			},
+			inOS:        "windows_server_2019_core",
+			inArch:      "x86_64",
+			wantedError: nil,
+		},
 		"invalid number of tasks": {
 			basicOpts: basicOpts{
 				inCount:  -1,
@@ -153,6 +182,16 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 			},
 			wantedError: errCPUNotPositive,
 		},
+		"invalid number of CPU units for Windows task": {
+			basicOpts: basicOpts{
+				inCount:  1,
+				inCPU:    260,
+				inMemory: 512,
+			},
+			inOS:        "WINDOWS_SERVER_2019_CORE",
+			inArch:      "X86_64",
+			wantedError: errors.New("CPU is 260, but it must be at least 1024 for a Windows-based task"),
+		},
 		"invalid memory": {
 			basicOpts: basicOpts{
 				inCount:  1,
@@ -160,6 +199,24 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 				inMemory: -1024,
 			},
 			wantedError: errMemNotPositive,
+		},
+		"invalid memory for Windows task": {
+			basicOpts: basicOpts{
+				inCount:  1,
+				inCPU:    1024,
+				inMemory: 2000,
+			},
+			inOS:        "WINDOWS_SERVER_2019_CORE",
+			inArch:      "X86_64",
+			wantedError: errors.New("memory is 2000, but it must be at least 2048 for a Windows-based task"),
+		},
+		"both build context and image name specified": {
+			basicOpts: defaultOpts,
+
+			inImage:                 "113459295.dkr.ecr.ap-northeast-1.amazonaws.com/my-app",
+			inDockerfileContextPath: "../../other",
+
+			wantedError: errors.New("cannot specify both `--image` and `--build-context`"),
 		},
 		"both dockerfile and image name specified": {
 			basicOpts: defaultOpts,
@@ -175,7 +232,14 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 			inDockerfilePath: "world/hello/Dockerfile",
 			isDockerfileSet:  true,
 
-			wantedError: errors.New("open world/hello/Dockerfile: file does not exist"),
+			wantedError: errors.New("invalid `--dockerfile` path: open world/hello/Dockerfile: file does not exist"),
+		},
+		"invalid build context path": {
+			basicOpts: defaultOpts,
+
+			inDockerfileContextPath: "world/hello/Dockerfile",
+
+			wantedError: errors.New("invalid `--build-context` path: open world/hello/Dockerfile: file does not exist"),
 		},
 		"specified app exists": {
 			basicOpts: defaultOpts,
@@ -252,14 +316,6 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 
 			wantedError: errors.New("cannot specify both `--subnets` and `--env`"),
 		},
-		"both environment and security groups specified": {
-			basicOpts: defaultOpts,
-
-			inEnv:            "test",
-			inSecurityGroups: []string{"security group id1", "securty group id2"},
-
-			wantedError: errors.New("cannot specify both `--security-groups` and `--env`"),
-		},
 		"both application and subnets specified": {
 			basicOpts: defaultOpts,
 
@@ -267,14 +323,6 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 			inSubnets: []string{"subnet id"},
 
 			wantedError: errors.New("cannot specify both `--subnets` and `--app`"),
-		},
-		"both application and security groups specified": {
-			basicOpts: defaultOpts,
-
-			appName:          "my-app",
-			inSecurityGroups: []string{"security group id1", "security group id2"},
-
-			wantedError: errors.New("cannot specify both `--security-groups` and `--app`"),
 		},
 		"both default and subnets specified": {
 			basicOpts: defaultOpts,
@@ -338,12 +386,15 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 					subnets:                     tc.inSubnets,
 					securityGroups:              tc.inSecurityGroups,
 					dockerfilePath:              tc.inDockerfilePath,
+					dockerfileContextPath:       tc.inDockerfileContextPath,
 					envVars:                     tc.inEnvVars,
 					secrets:                     tc.inSecrets,
 					command:                     tc.inCommand,
 					entrypoint:                  tc.inEntryPoint,
 					useDefaultSubnetsAndCluster: tc.inDefault,
 					generateCommandTarget:       tc.inGenerateCommandTarget,
+					os:                          tc.inOS,
+					arch:                        tc.inArch,
 				},
 				isDockerfileSet: tc.isDockerfileSet,
 				nFlag:           2,
@@ -361,7 +412,7 @@ func TestTaskRunOpts_Validate(t *testing.T) {
 
 			err := opts.Validate()
 			if tc.wantedError != nil {
-				require.EqualError(t, tc.wantedError, err.Error())
+				require.EqualError(t, err, tc.wantedError.Error())
 			} else {
 				require.NoError(t, err)
 			}
@@ -377,9 +428,14 @@ func TestTaskRunOpts_Ask(t *testing.T) {
 		inSubnets        []string
 		inSecurityGroups []string
 
-		inDefault bool
-		inEnv     string
-		appName   string
+		inDefault                  bool
+		inEnv                      string
+		appName                    string
+		inSecrets                  map[string]string
+		inSsmParamSecrets          map[string]string
+		inSecretsManagerSecrets    map[string]string
+		inAcknowledgeSecretsAccess bool
+		inExecutionRole            string
 
 		mockSel    func(m *mocks.MockappEnvSelector)
 		mockPrompt func(m *mocks.Mockprompter)
@@ -569,6 +625,41 @@ func TestTaskRunOpts_Ask(t *testing.T) {
 
 			wantedError: errors.New("ask for environment: error selecting environment"),
 		},
+		"When secrets are provided without app and env leads to a secret access permission prompt": {
+			inSecrets: map[string]string{
+				"quiet": "shh",
+			},
+			inSsmParamSecrets: map[string]string{
+				"quiet": "shh",
+			},
+			inSecretsManagerSecrets: map[string]string{
+				"quiet": "shh",
+			},
+			inCluster: "cluster-1",
+			mockPrompt: func(m *mocks.Mockprompter) {
+				m.EXPECT().Confirm(taskSecretsPermissionPrompt, taskSecretsPermissionPromptHelp).Return(true, nil)
+			},
+		},
+		"secret access permission prompt is skipped when acknowledge-secret-access flag is provided": {
+			inSecrets: map[string]string{
+				"quiet": "shh",
+			},
+			inCluster:                  "cluster-1",
+			inAcknowledgeSecretsAccess: true,
+			mockPrompt: func(m *mocks.Mockprompter) {
+				m.EXPECT().Confirm(taskSecretsPermissionPrompt, taskSecretsPermissionPromptHelp).Times(0)
+			},
+		},
+		"secret access permission prompt is skipped when execution-role is provided": {
+			inSecrets: map[string]string{
+				"quiet": "shh",
+			},
+			inCluster:       "cluster-1",
+			inExecutionRole: "test-role",
+			mockPrompt: func(m *mocks.Mockprompter) {
+				m.EXPECT().Confirm(taskSecretsPermissionPrompt, taskSecretsPermissionPromptHelp).Times(0)
+			},
+		},
 	}
 
 	for name, tc := range testCases {
@@ -596,8 +687,14 @@ func TestTaskRunOpts_Ask(t *testing.T) {
 					subnets:                     tc.inSubnets,
 					securityGroups:              tc.inSecurityGroups,
 					cluster:                     tc.inCluster,
+					acknowledgeSecretsAccess:    tc.inAcknowledgeSecretsAccess,
+					secrets:                     tc.inSecrets,
+					executionRole:               tc.inExecutionRole,
 				},
-				sel: mockSel,
+				sel:                   mockSel,
+				prompt:                mockPrompter,
+				secretsManagerSecrets: tc.inSecretsManagerSecrets,
+				ssmParamSecrets:       tc.inSsmParamSecrets,
 			}
 
 			err := opts.Ask()
@@ -651,6 +748,7 @@ func TestTaskRunOpts_Execute(t *testing.T) {
 		inSecrets    map[string]string
 		inImage      string
 		inTag        string
+		inDockerCtx  string
 		inFollow     bool
 		inCommand    string
 		inEntryPoint string
@@ -700,6 +798,22 @@ func TestTaskRunOpts_Execute(t *testing.T) {
 			},
 			wantedError: errors.New("provision resources for task my-task: error deploying"),
 		},
+		"error getting repo URI": {
+			setupMocks: func(m runTaskMocks) {
+				m.provider.EXPECT().Default().Return(&session.Session{}, nil)
+				m.store.EXPECT().GetEnvironment(gomock.Any(), gomock.Any()).AnyTimes()
+				m.deployer.EXPECT().DeployTask(gomock.Any(), &deploy.CreateTaskResourcesInput{
+					Name:       inGroupName,
+					Image:      "",
+					Command:    []string{},
+					EntryPoint: []string{},
+				}).Return(nil)
+				m.repository.EXPECT().BuildAndPush(gomock.Any(), gomock.Eq(&defaultBuildArguments))
+				m.repository.EXPECT().URI().Return(mockRepoURI, errors.New("some error"))
+				mockHasDefaultCluster(m)
+			},
+			wantedError: errors.New("get ECR repository URI: some error"),
+		},
 		"error updating resources": {
 			setupMocks: func(m runTaskMocks) {
 				m.provider.EXPECT().Default().Return(&session.Session{}, nil)
@@ -711,7 +825,7 @@ func TestTaskRunOpts_Execute(t *testing.T) {
 					EntryPoint: []string{},
 				}).Return(nil)
 				m.repository.EXPECT().BuildAndPush(gomock.Any(), gomock.Eq(&defaultBuildArguments))
-				m.repository.EXPECT().URI().Return(mockRepoURI)
+				m.repository.EXPECT().URI().Return(mockRepoURI, nil)
 				m.deployer.EXPECT().DeployTask(gomock.Any(), &deploy.CreateTaskResourcesInput{
 					Name:       inGroupName,
 					Image:      "uri/repo:latest",
@@ -774,32 +888,40 @@ func TestTaskRunOpts_Execute(t *testing.T) {
 				mockHasDefaultCluster(m)
 			},
 		},
-		"update image to task resource if image is not provided": {
-			inSecrets: map[string]string{
-				"quiet": "shh",
+		"should use provided docker build context instead of dockerfile path": {
+			inDockerCtx: "../../other",
+			setupMocks: func(m runTaskMocks) {
+				m.provider.EXPECT().Default().Return(&session.Session{}, nil)
+				m.store.EXPECT().GetEnvironment(gomock.Any(), gomock.Any()).AnyTimes()
+				m.deployer.EXPECT().DeployTask(gomock.Any(), gomock.Any()).AnyTimes()
+				m.repository.EXPECT().BuildAndPush(gomock.Any(), gomock.Eq(
+					&dockerengine.BuildArguments{
+						Context: "../../other",
+						Tags:    []string{imageTagLatest},
+					}),
+				)
+				m.repository.EXPECT().URI().AnyTimes()
+				m.runner.EXPECT().Run().AnyTimes()
+				mockHasDefaultCluster(m)
 			},
+		},
+		"update image to task resource if image is not provided": {
 			inCommand:    `/bin/sh -c "curl $ECS_CONTAINER_METADATA_URI_V4"`,
 			inEntryPoint: `exec "some command"`,
 			setupMocks: func(m runTaskMocks) {
 				m.provider.EXPECT().Default().Return(&session.Session{}, nil)
 				m.store.EXPECT().GetEnvironment(gomock.Any(), gomock.Any()).AnyTimes()
 				m.deployer.EXPECT().DeployTask(gomock.Any(), &deploy.CreateTaskResourcesInput{
-					Name:  inGroupName,
-					Image: "",
-					Secrets: map[string]string{
-						"quiet": "shh",
-					},
+					Name:       inGroupName,
+					Image:      "",
 					Command:    []string{"/bin/sh", "-c", "curl $ECS_CONTAINER_METADATA_URI_V4"},
 					EntryPoint: []string{"exec", "some command"},
 				}).Times(1).Return(nil)
 				m.repository.EXPECT().BuildAndPush(gomock.Any(), gomock.Eq(&defaultBuildArguments))
-				m.repository.EXPECT().URI().Return(mockRepoURI)
+				m.repository.EXPECT().URI().Return(mockRepoURI, nil)
 				m.deployer.EXPECT().DeployTask(gomock.Any(), &deploy.CreateTaskResourcesInput{
-					Name:  inGroupName,
-					Image: "uri/repo:latest",
-					Secrets: map[string]string{
-						"quiet": "shh",
-					},
+					Name:       inGroupName,
+					Image:      "uri/repo:latest",
 					Command:    []string{"/bin/sh", "-c", "curl $ECS_CONTAINER_METADATA_URI_V4"},
 					EntryPoint: []string{"exec", "some command"},
 				}).Times(1).Return(nil)
@@ -886,8 +1008,10 @@ func TestTaskRunOpts_Execute(t *testing.T) {
 				runTaskVars: runTaskVars{
 					groupName: inGroupName,
 
-					image:      tc.inImage,
-					imageTag:   tc.inTag,
+					image:                 tc.inImage,
+					imageTag:              tc.inTag,
+					dockerfileContextPath: tc.inDockerCtx,
+
 					env:        tc.inEnv,
 					follow:     tc.inFollow,
 					secrets:    tc.inSecrets,
@@ -997,7 +1121,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"should generate a command given an app/env/svc target": {
 			inGenerateCommandTarget: "good-app/good-env/good-service",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "good-service").Return(nil, &config.ErrNoSuchJob{})
 				m.store.EXPECT().GetService("good-app", "good-service").Return(&config.Workload{}, nil)
 			},
@@ -1011,7 +1139,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"fail to generate a command given an app/env/svc target": {
 			inGenerateCommandTarget: "good-app/good-env/good-service",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "good-service").Return(nil, &config.ErrNoSuchJob{})
 				m.store.EXPECT().GetService("good-app", "good-service").Return(&config.Workload{}, nil)
 			},
@@ -1025,7 +1157,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"should generate a command given an app/env/job target": {
 			inGenerateCommandTarget: "good-app/good-env/good-job",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "good-job").Return(&config.Workload{}, nil)
 			},
 			mockRunTaskRequester: mockRunTaskRequester{
@@ -1038,7 +1174,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"fail to generate a command given an app/env/job target": {
 			inGenerateCommandTarget: "good-app/good-env/good-job",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "good-job").Return(&config.Workload{}, nil)
 			},
 			mockRunTaskRequester: mockRunTaskRequester{
@@ -1051,7 +1191,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"fail to determine if the workload is a job given an app/env/workload target": {
 			inGenerateCommandTarget: "good-app/good-env/bad-workload",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "bad-workload").Return(nil, errors.New("some error"))
 			},
 			wantedError: fmt.Errorf("determine whether workload bad-workload is a job: some error"),
@@ -1059,7 +1203,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"fail to determine if the workload is a service given an app/env/workload target": {
 			inGenerateCommandTarget: "good-app/good-env/bad-workload",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "bad-workload").Return(nil, &config.ErrNoSuchJob{})
 				m.store.EXPECT().GetService("good-app", "bad-workload").Return(nil, errors.New("some error"))
 			},
@@ -1068,7 +1216,11 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		"workload is neither a job nor a service": {
 			inGenerateCommandTarget: "good-app/good-env/bad-workload",
 			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
+				m.store.EXPECT().GetEnvironment("good-app", "good-env").Return(&config.Environment{
+					ManagerRoleARN: "mock-role",
+					Region:         "mock-region",
+				}, nil)
+				m.provider.EXPECT().FromRole("mock-role", "mock-region")
 				m.store.EXPECT().GetJob("good-app", "bad-workload").Return(nil, &config.ErrNoSuchJob{})
 				m.store.EXPECT().GetService("good-app", "bad-workload").Return(nil, &config.ErrNoSuchService{})
 			},
@@ -1076,10 +1228,8 @@ func TestTaskRunOpts_runTaskCommand(t *testing.T) {
 		},
 		"invalid input": {
 			inGenerateCommandTarget: "invalid/illegal/not-good/input/is/bad",
-			setUpMocks: func(m *taskRunMocks) {
-				m.provider.EXPECT().Default()
-			},
-			wantedError: errors.New("invalid input to --generate-cmd: must be of format <cluster>/<service> or <app>/<env>/<workload>"),
+			setUpMocks:              func(m *taskRunMocks) {},
+			wantedError:             errors.New("invalid input to --generate-cmd: must be of format <cluster>/<service> or <app>/<env>/<workload>"),
 		},
 	}
 	for name, tc := range testCases {

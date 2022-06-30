@@ -5,11 +5,12 @@ package stack
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
+	"gopkg.in/yaml.v3"
+
 	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
@@ -29,30 +30,36 @@ type EnvStackConfig struct {
 }
 
 const (
-	// Mandatory parameter keys.
-	envParamAppNameKey               = "AppName"
-	envParamEnvNameKey               = "EnvironmentName"
-	envParamToolsAccountPrincipalKey = "ToolsAccountPrincipalARN"
-	envParamAppDNSKey                = "AppDNSName"
-	envParamAppDNSDelegationRoleKey  = "AppDNSDelegationRole"
-	EnvParamAliasesKey               = "Aliases"
+	// Parameter keys.
+	envParamAppNameKey                     = "AppName"
+	envParamEnvNameKey                     = "EnvironmentName"
+	envParamToolsAccountPrincipalKey       = "ToolsAccountPrincipalARN"
+	envParamAppDNSKey                      = "AppDNSName"
+	envParamAppDNSDelegationRoleKey        = "AppDNSDelegationRole"
+	EnvParamAliasesKey                     = "Aliases"
+	EnvParamALBWorkloadsKey                = "ALBWorkloads"
+	envParamInternalALBWorkloadsKey        = "InternalALBWorkloads"
+	envParamEFSWorkloadsKey                = "EFSWorkloads"
+	envParamNATWorkloadsKey                = "NATWorkloads"
+	envParamCreateHTTPSListenerKey         = "CreateHTTPSListener"
+	envParamCreateInternalHTTPSListenerKey = "CreateInternalHTTPSListener"
+	EnvParamServiceDiscoveryEndpoint       = "ServiceDiscoveryEndpoint"
 
 	// Output keys.
-	EnvOutputVPCID                   = "VpcId"
-	EnvOutputPublicSubnets           = "PublicSubnets"
-	EnvOutputPrivateSubnets          = "PrivateSubnets"
-	envOutputCFNExecutionRoleARN     = "CFNExecutionRoleARN"
-	envOutputManagerRoleKey          = "EnvironmentManagerRoleARN"
-	EnvParamServiceDiscoveryEndpoint = "ServiceDiscoveryEndpoint"
+	EnvOutputVPCID               = "VpcId"
+	EnvOutputPublicSubnets       = "PublicSubnets"
+	EnvOutputPrivateSubnets      = "PrivateSubnets"
+	envOutputCFNExecutionRoleARN = "CFNExecutionRoleARN"
+	envOutputManagerRoleKey      = "EnvironmentManagerRoleARN"
 
-	// Default parameter values
-	DefaultVPCCIDR            = "10.0.0.0/16"
-	DefaultPublicSubnetCIDRs  = "10.0.0.0/24,10.0.1.0/24"
-	DefaultPrivateSubnetCIDRs = "10.0.2.0/24,10.0.3.0/24"
+	// Default parameter values.
+	DefaultVPCCIDR = "10.0.0.0/16"
 )
 
 var (
 	fmtServiceDiscoveryEndpoint = "%s.%s.local"
+	DefaultPublicSubnetCIDRs    = []string{"10.0.0.0/24", "10.0.1.0/24"}
+	DefaultPrivateSubnetCIDRs   = []string{"10.0.2.0/24", "10.0.3.0/24"}
 )
 
 // NewEnvStackConfig sets up a struct which can provide values to CloudFormation for
@@ -66,11 +73,12 @@ func NewEnvStackConfig(input *deploy.CreateEnvironmentInput) *EnvStackConfig {
 
 // Template returns the environment CloudFormation template.
 func (e *EnvStackConfig) Template() (string, error) {
-	vpcConf := &config.AdjustVPC{
-		CIDR:               DefaultVPCCIDR,
-		PrivateSubnetCIDRs: strings.Split(DefaultPrivateSubnetCIDRs, ","),
-		PublicSubnetCIDRs:  strings.Split(DefaultPublicSubnetCIDRs, ","),
+	crs, err := convertCustomResources(e.in.LambdaURLs)
+	if err != nil {
+		return "", err
 	}
+
+	// TODO(Lou1415926): remove all these after we are able to migrate to the new upload workflow.
 	bucket, dnsCertValidator, err := s3.ParseURL(e.in.CustomResourcesURLs[template.DNSCertValidatorFileName])
 	if err != nil {
 		return "", err
@@ -79,32 +87,41 @@ func (e *EnvStackConfig) Template() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	_, enableLongARN, err := s3.ParseURL(e.in.CustomResourcesURLs[template.EnableLongARNsFileName])
-	if err != nil {
-		return "", err
-	}
 	_, customDomain, err := s3.ParseURL(e.in.CustomResourcesURLs[template.CustomDomainFileName])
 	if err != nil {
 		return "", err
 	}
-
-	if e.in.AdjustVPCConfig != nil {
-		vpcConf = e.in.AdjustVPCConfig
+	var mft string
+	if e.in.Mft != nil {
+		out, err := yaml.Marshal(e.in.Mft)
+		if err != nil {
+			return "", fmt.Errorf("marshal environment manifest to embed in template: %v", err)
+		}
+		mft = string(out)
 	}
-
 	content, err := e.parser.ParseEnv(&template.EnvOpts{
-		AppName:                   e.in.App.Name,
-		DNSCertValidatorLambda:    dnsCertValidator,
-		DNSDelegationLambda:       dnsDelegation,
-		EnableLongARNFormatLambda: enableLongARN,
-		CustomDomainLambda:        customDomain,
-		ScriptBucketName:          bucket,
-		ImportVPC:                 e.in.ImportVPCConfig,
-		VPCConfig:                 vpcConf,
-		Version:                   e.in.Version,
-		LatestVersion:             deploy.LatestEnvTemplateVersion,
+		AppName:                  e.in.App.Name,
+		EnvName:                  e.in.Name,
+		CustomResources:          crs,
+		DNSCertValidatorLambda:   dnsCertValidator,
+		DNSDelegationLambda:      dnsDelegation,
+		CustomDomainLambda:       customDomain,
+		ScriptBucketName:         bucket,
+		ArtifactBucketARN:        e.in.ArtifactBucketARN,
+		ArtifactBucketKeyARN:     e.in.ArtifactBucketKeyARN,
+		PublicImportedCertARNs:   e.importPublicCertARNs(),
+		PrivateImportedCertARNs:  e.importPrivateCertARNs(),
+		VPCConfig:                e.vpcConfig(),
+		CustomInternalALBSubnets: e.internalALBSubnets(),
+		AllowVPCIngress:          e.in.AllowVPCIngress, // TODO(jwh): fetch AllowVPCIngress from Manifest or SSM.
+		Telemetry:                e.telemetryConfig(),
+
+		Version:       e.in.Version,
+		LatestVersion: deploy.LatestEnvTemplateVersion,
+		Manifest:      mft,
 	}, template.WithFuncs(map[string]interface{}{
-		"inc": template.IncFunc,
+		"inc":      template.IncFunc,
+		"fmtSlice": template.FmtSliceFunc,
 	}))
 	if err != nil {
 		return "", err
@@ -112,8 +129,119 @@ func (e *EnvStackConfig) Template() (string, error) {
 	return content.String(), nil
 }
 
-// Parameters returns the parameters to be passed into a environment CloudFormation template.
+func (e *EnvStackConfig) vpcConfig() template.VPCConfig {
+	return template.VPCConfig{
+		Imported: e.importVPC(),
+		Managed:  e.managedVPC(),
+	}
+}
+
+func (e *EnvStackConfig) importVPC() *template.ImportVPC {
+	// If a manifest is present, it is the only place we look at.
+	if e.in.Mft != nil {
+		return e.in.Mft.Network.VPC.ImportedVPC()
+	}
+
+	// Fallthrough to SSM config.
+	if e.in.ImportVPCConfig == nil {
+		return nil
+	}
+	return &template.ImportVPC{
+		ID:               e.in.ImportVPCConfig.ID,
+		PublicSubnetIDs:  e.in.ImportVPCConfig.PublicSubnetIDs,
+		PrivateSubnetIDs: e.in.ImportVPCConfig.PrivateSubnetIDs,
+	}
+}
+
+func (e *EnvStackConfig) managedVPC() template.ManagedVPC {
+	defaultManagedVPC := template.ManagedVPC{
+		CIDR:               DefaultVPCCIDR,
+		PublicSubnetCIDRs:  DefaultPublicSubnetCIDRs,
+		PrivateSubnetCIDRs: DefaultPrivateSubnetCIDRs,
+	}
+	// If a manifest is present, it is the only place we look at.
+	if e.in.Mft != nil {
+		if v := e.in.Mft.Network.VPC.ManagedVPC(); v != nil {
+			return *v
+		}
+		return defaultManagedVPC
+	}
+
+	// Fallthrough to SSM config.
+	if e.in.AdjustVPCConfig == nil {
+		return defaultManagedVPC
+	}
+	return template.ManagedVPC{
+		CIDR:               e.in.AdjustVPCConfig.CIDR,
+		AZs:                e.in.AdjustVPCConfig.AZs,
+		PublicSubnetCIDRs:  e.in.AdjustVPCConfig.PublicSubnetCIDRs,
+		PrivateSubnetCIDRs: e.in.AdjustVPCConfig.PrivateSubnetCIDRs,
+	}
+}
+
+func (e *EnvStackConfig) telemetryConfig() *template.Telemetry {
+	// If a manifest is present, it is the only place we look at.
+	if e.in.Mft != nil {
+		return &template.Telemetry{
+			EnableContainerInsights: aws.BoolValue(e.in.Mft.Observability.ContainerInsights),
+		}
+	}
+
+	// Fallthrough to SSM config.
+	if e.in.Telemetry == nil {
+		// For environments before Copilot v1.14.0, `Telemetry` is nil.
+		return nil
+	}
+	return &template.Telemetry{
+		// For environments after v1.14.0, and v1.20.0, `Telemetry` is never nil,
+		// and `EnableContainerInsights` is either true or false.
+		EnableContainerInsights: e.in.Telemetry.EnableContainerInsights,
+	}
+}
+
+func (e *EnvStackConfig) importPublicCertARNs() []string {
+	// If a manifest is present, it is the only place we look at.
+	if e.in.Mft != nil {
+		return e.in.Mft.HTTPConfig.Public.Certificates
+	}
+	// Fallthrough to SSM config.
+	if e.in.ImportVPCConfig != nil && len(e.in.ImportVPCConfig.PublicSubnetIDs) == 0 {
+		return nil
+	}
+	return e.in.ImportCertARNs
+}
+
+func (e *EnvStackConfig) importPrivateCertARNs() []string {
+	// If a manifest is present, it is the only place we look at.
+	if e.in.Mft != nil {
+		return e.in.Mft.HTTPConfig.Private.Certificates
+	}
+	// Fallthrough to SSM config.
+	if e.in.ImportVPCConfig != nil && len(e.in.ImportVPCConfig.PublicSubnetIDs) == 0 {
+		return e.in.ImportCertARNs
+	}
+	return nil
+}
+
+func (e *EnvStackConfig) internalALBSubnets() []string {
+	// If a manifest is present, it is the only place we look.
+	if e.in.Mft != nil {
+		return e.in.Mft.HTTPConfig.Private.InternalALBSubnets
+	}
+	// Fallthrough to SSM config.
+	return e.in.InternalALBSubnets
+}
+
+// Parameters returns the parameters to be passed into an environment CloudFormation template.
 func (e *EnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
+	httpsListener := "false"
+	if len(e.importPublicCertARNs()) != 0 || e.in.App.Domain != "" {
+		httpsListener = "true"
+	}
+	internalHTTPSListener := "false"
+	if len(e.importPrivateCertARNs()) != 0 {
+		internalHTTPSListener = "true"
+	}
 	return []*cloudformation.Parameter{
 		{
 			ParameterKey:   aws.String(envParamAppNameKey),
@@ -129,7 +257,7 @@ func (e *EnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
 		},
 		{
 			ParameterKey:   aws.String(envParamAppDNSKey),
-			ParameterValue: aws.String(e.in.App.DNSName),
+			ParameterValue: aws.String(e.in.App.Domain),
 		},
 		{
 			ParameterKey:   aws.String(envParamAppDNSDelegationRoleKey),
@@ -139,7 +267,42 @@ func (e *EnvStackConfig) Parameters() ([]*cloudformation.Parameter, error) {
 			ParameterKey:   aws.String(EnvParamServiceDiscoveryEndpoint),
 			ParameterValue: aws.String(fmt.Sprintf(fmtServiceDiscoveryEndpoint, e.in.Name, e.in.App.Name)),
 		},
+		{
+			ParameterKey:   aws.String(envParamCreateHTTPSListenerKey),
+			ParameterValue: aws.String(httpsListener),
+		},
+		{
+			ParameterKey:   aws.String(envParamCreateInternalHTTPSListenerKey),
+			ParameterValue: aws.String(internalHTTPSListener),
+		},
+		{
+			ParameterKey:   aws.String(EnvParamAliasesKey),
+			ParameterValue: aws.String(""),
+		},
+		{
+			ParameterKey:   aws.String(EnvParamALBWorkloadsKey),
+			ParameterValue: aws.String(""),
+		},
+		{
+			ParameterKey:   aws.String(envParamInternalALBWorkloadsKey),
+			ParameterValue: aws.String(""),
+		},
+		{
+			ParameterKey:   aws.String(envParamEFSWorkloadsKey),
+			ParameterValue: aws.String(""),
+		},
+		{
+			ParameterKey:   aws.String(envParamNATWorkloadsKey),
+			ParameterValue: aws.String(""),
+		},
 	}, nil
+}
+
+// SerializedParameters returns the CloudFormation stack's parameters serialized
+// to a YAML document annotated with comments for readability to users.
+func (e *EnvStackConfig) SerializedParameters() (string, error) {
+	// No-op for now.
+	return "", nil
 }
 
 // Tags returns the tags that should be applied to the environment CloudFormation stack.
@@ -171,7 +334,6 @@ func (e *EnvStackConfig) ToEnv(stack *cloudformation.Stack) (*config.Environment
 	return &config.Environment{
 		Name:             e.in.Name,
 		App:              e.in.App.Name,
-		Prod:             e.in.Prod,
 		Region:           stackARN.Region,
 		AccountID:        stackARN.AccountID,
 		ManagerRoleARN:   stackOutputs[envOutputManagerRoleKey],

@@ -1,3 +1,4 @@
+PlatformVersion: {{.Platform.Version}}
 Cluster:
   Fn::ImportValue:
     !Sub '${AppName}-${EnvName}-ClusterId'
@@ -13,8 +14,8 @@ DeploymentConfiguration:
   DeploymentCircuitBreaker:
     Enable: true
     Rollback: true
-  MinimumHealthyPercent: 100
-  MaximumPercent: 200
+  MinimumHealthyPercent: {{ .DeploymentConfiguration.MinHealthyPercent }}
+  MaximumPercent: {{ .DeploymentConfiguration.MaxPercent }}
 PropagateTags: SERVICE
 {{- if .ExecuteCommand }}
 EnableExecuteCommand: true
@@ -36,13 +37,22 @@ NetworkConfiguration:
   AwsvpcConfiguration:
     AssignPublicIp: {{.Network.AssignPublicIP}}
     Subnets:
+    {{- if .Network.SubnetIDs}}
+      {{- range $id := .Network.SubnetIDs}}
+      - {{$id}}
+      {{- end}}
+    {{- else}}
       Fn::Split:
         - ','
         - Fn::ImportValue: !Sub '${AppName}-${EnvName}-{{.Network.SubnetsType}}'
+    {{- end}}
     SecurityGroups:
       - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
       {{- range $sg := .Network.SecurityGroups}}
       - {{$sg}}
+      {{- end}}
+      {{- if .NLB}}
+      - !Ref NLBSecurityGroup
       {{- end}}
       {{- if .NestedStack}}{{$stackName := .NestedStack.StackName}}{{range $sg := .NestedStack.SecurityGroupOutputs}}
       - Fn::GetAtt: [{{$stackName}}, Outputs.{{$sg}}]

@@ -7,26 +7,28 @@ import (
 	"encoding"
 	"io"
 
-	"github.com/aws/copilot-cli/internal/pkg/docker/dockerfile"
-
-	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
-
-	"github.com/aws/copilot-cli/internal/pkg/aws/ssm"
+	"github.com/aws/copilot-cli/internal/pkg/aws/secretsmanager"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	awscloudformation "github.com/aws/copilot-cli/internal/pkg/aws/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/aws/codepipeline"
+	"github.com/aws/copilot-cli/internal/pkg/aws/ec2"
 	awsecs "github.com/aws/copilot-cli/internal/pkg/aws/ecs"
 	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
+	"github.com/aws/copilot-cli/internal/pkg/aws/ssm"
+	clideploy "github.com/aws/copilot-cli/internal/pkg/cli/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe"
+	"github.com/aws/copilot-cli/internal/pkg/docker/dockerengine"
+	"github.com/aws/copilot-cli/internal/pkg/docker/dockerfile"
 	"github.com/aws/copilot-cli/internal/pkg/ecs"
 	"github.com/aws/copilot-cli/internal/pkg/exec"
 	"github.com/aws/copilot-cli/internal/pkg/initialize"
 	"github.com/aws/copilot-cli/internal/pkg/logging"
+	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/aws/copilot-cli/internal/pkg/repository"
 	"github.com/aws/copilot-cli/internal/pkg/task"
 	termprogress "github.com/aws/copilot-cli/internal/pkg/term/progress"
@@ -140,6 +142,7 @@ type store interface {
 type deployedEnvironmentLister interface {
 	ListEnvironmentsDeployedTo(appName, svcName string) ([]string, error)
 	ListDeployedServices(appName, envName string) ([]string, error)
+	ListDeployedJobs(appName string, envName string) ([]string, error)
 	IsServiceDeployed(appName, envName string, svcName string) (bool, error)
 	ListSNSTopics(appName string, envName string) ([]deploy.Topic, error)
 }
@@ -156,6 +159,7 @@ type secretCreator interface {
 }
 
 type secretDeleter interface {
+	DescribeSecret(secretName string) (*secretsmanager.DescribeSecretOutput, error)
 	DeleteSecret(secretName string) error
 }
 
@@ -164,7 +168,7 @@ type imageBuilderPusher interface {
 }
 
 type repositoryURIGetter interface {
-	URI() string
+	URI() (string, error)
 }
 
 type repositoryService interface {
@@ -178,11 +182,6 @@ type logEventsWriter interface {
 
 type templater interface {
 	Template() (string, error)
-}
-
-type stackSerializer interface {
-	templater
-	SerializedParameters() (string, error)
 }
 
 type runner interface {
@@ -229,71 +228,74 @@ type wsFileDeleter interface {
 	DeleteWorkspaceFile() error
 }
 
-type svcManifestReader interface {
-	ReadServiceManifest(svcName string) ([]byte, error)
+type manifestReader interface {
+	ReadWorkloadManifest(name string) (workspace.WorkloadManifest, error)
 }
 
-type jobManifestReader interface {
-	ReadJobManifest(jobName string) ([]byte, error)
-}
-
-type copilotDirGetter interface {
-	CopilotDirPath() (string, error)
+type workspacePathGetter interface {
+	Path() (string, error)
 }
 
 type wsPipelineManifestReader interface {
-	ReadPipelineManifest() ([]byte, error)
+	ReadPipelineManifest(path string) (*manifest.Pipeline, error)
 }
 
-type wsPipelineWriter interface {
-	WritePipelineBuildspec(marshaler encoding.BinaryMarshaler) (string, error)
-	WritePipelineManifest(marshaler encoding.BinaryMarshaler) (string, error)
+type wsPipelineIniter interface {
+	WritePipelineBuildspec(marshaler encoding.BinaryMarshaler, name string) (string, error)
+	WritePipelineManifest(marshaler encoding.BinaryMarshaler, name string) (string, error)
+	Rel(path string) (string, error)
+	ListPipelines() ([]workspace.PipelineManifest, error)
 }
 
-type wsServiceLister interface {
-	ServiceNames() ([]string, error)
+type serviceLister interface {
+	ListServices() ([]string, error)
 }
 
 type wsSvcReader interface {
-	wsServiceLister
-	svcManifestReader
+	serviceLister
+	manifestReader
 }
 
-type wsSvcDirReader interface {
-	wsSvcReader
-	copilotDirGetter
-}
-
-type wsJobLister interface {
-	JobNames() ([]string, error)
+type jobLister interface {
+	ListJobs() ([]string, error)
 }
 
 type wsJobReader interface {
-	jobManifestReader
-	wsJobLister
+	manifestReader
+	jobLister
 }
 
-type wsWlReader interface {
-	WorkloadNames() ([]string, error)
+type wlLister interface {
+	ListWorkloads() ([]string, error)
 }
 
 type wsJobDirReader interface {
 	wsJobReader
-	copilotDirGetter
+	workspacePathGetter
 }
 
 type wsWlDirReader interface {
 	wsJobReader
 	wsSvcReader
-	copilotDirGetter
-	wsWlReader
+	workspacePathGetter
+	wlLister
 	ListDockerfiles() ([]string, error)
 	Summary() (*workspace.Summary, error)
 }
 
+type wsEnvironmentReader interface {
+	ReadEnvironmentManifest(mftDirName string) (workspace.EnvironmentManifest, error)
+}
+
 type wsPipelineReader interface {
+	wsPipelineGetter
+	Rel(path string) (string, error)
+}
+
+type wsPipelineGetter interface {
 	wsPipelineManifestReader
-	WorkloadNames() ([]string, error)
+	wlLister
+	ListPipelines() ([]workspace.PipelineManifest, error)
 }
 
 type wsAppManager interface {
@@ -303,26 +305,17 @@ type wsAppManager interface {
 
 type wsAddonManager interface {
 	WriteAddon(f encoding.BinaryMarshaler, svc, name string) (string, error)
-	wsWlReader
+	manifestReader
+	wlLister
 }
 
-type artifactUploader interface {
-	PutArtifact(bucket, fileName string, data io.Reader) (string, error)
-}
-
-type zipAndUploader interface {
+type uploader interface {
+	Upload(bucket, key string, data io.Reader) (string, error)
 	ZipAndUpload(bucket, key string, files ...s3.NamedBinary) (string, error)
-}
-
-type Uploader interface {
-	zipAndUploader
-	Upload(bucket, key string, file s3.NamedBinary) (string, error)
 }
 
 type customResourcesUploader interface {
 	UploadEnvironmentCustomResources(upload s3.CompressAndUploadFunc) (map[string]string, error)
-	UploadRequestDrivenWebServiceCustomResources(upload s3.CompressAndUploadFunc) (map[string]string, error)
-	UploadRequestDrivenWebServiceLayers(upload s3.UploadFunc) (map[string]string, error)
 }
 
 type bucketEmptier interface {
@@ -331,7 +324,7 @@ type bucketEmptier interface {
 
 // Interfaces for deploying resources through CloudFormation. Facilitates mocking.
 type environmentDeployer interface {
-	DeployAndRenderEnvironment(out termprogress.FileWriter, env *deploy.CreateEnvironmentInput) error
+	CreateAndRenderEnvironment(out termprogress.FileWriter, env *deploy.CreateEnvironmentInput) error
 	DeleteEnvironment(appName, envName, cfnExecRoleARN string) error
 	GetEnvironment(appName, envName string) (*config.Environment, error)
 	EnvironmentTemplate(appName, envName string) (string, error)
@@ -358,7 +351,7 @@ type pipelineDeployer interface {
 	CreatePipeline(env *deploy.CreatePipelineInput, bucketName string) error
 	UpdatePipeline(env *deploy.CreatePipelineInput, bucketName string) error
 	PipelineExists(env *deploy.CreatePipelineInput) (bool, error)
-	DeletePipeline(pipelineName string) error
+	DeletePipeline(pipeline deploy.Pipeline) error
 	AddPipelineResourcesToApp(app *config.Application, region string) error
 	appResourcesGetter
 	// TODO: Add StreamPipelineCreation method
@@ -389,6 +382,7 @@ type taskStackManager interface {
 
 type taskRunner interface {
 	Run() ([]*task.Task, error)
+	CheckNonZeroExitCode([]*task.Task) error
 }
 
 type defaultClusterGetter interface {
@@ -406,6 +400,10 @@ type domainHostedZoneGetter interface {
 	DomainHostedZoneID(domainName string) (string, error)
 }
 
+type domainInfoGetter interface {
+	IsRegisteredDomain(domainName string) error
+}
+
 type dockerfileParser interface {
 	GetExposedPorts() ([]dockerfile.Port, error)
 	GetHealthCheck() (*dockerfile.HealthCheck, error)
@@ -417,14 +415,17 @@ type statusDescriber interface {
 
 type envDescriber interface {
 	Describe() (*describe.EnvDescription, error)
+	PublicCIDRBlocks() ([]string, error)
+	Manifest() ([]byte, error)
+}
+
+type versionCompatibilityChecker interface {
+	versionGetter
+	AvailableFeatures() ([]string, error)
 }
 
 type versionGetter interface {
 	Version() (string, error)
-}
-
-type endpointGetter interface {
-	ServiceDiscoveryEndpoint() (string, error)
 }
 
 type envTemplater interface {
@@ -451,8 +452,10 @@ type appUpgrader interface {
 
 type pipelineGetter interface {
 	GetPipeline(pipelineName string) (*codepipeline.Pipeline, error)
-	ListPipelineNamesByTags(tags map[string]string) ([]string, error)
-	GetPipelinesByTags(tags map[string]string) ([]*codepipeline.Pipeline, error)
+}
+
+type deployedPipelineLister interface {
+	ListDeployedPipelines(appName string) ([]deploy.Pipeline, error)
 }
 
 type executor interface {
@@ -484,8 +487,21 @@ type deploySelector interface {
 	DeployedService(prompt, help string, app string, opts ...selector.GetDeployedServiceOpts) (*selector.DeployedService, error)
 }
 
-type pipelineSelector interface {
+type pipelineEnvSelector interface {
 	Environments(prompt, help, app string, finalMsgFunc func(int) prompt.PromptConfig) ([]string, error)
+}
+
+type wsPipelineSelector interface {
+	WsPipeline(prompt, help string) (*workspace.PipelineManifest, error)
+}
+
+type wsEnvironmentSelector interface {
+	LocalEnvironment(msg, help string) (wl string, err error)
+}
+
+type codePipelineSelector interface {
+	appSelector
+	DeployedPipeline(prompt, help, app string) (deploy.Pipeline, error)
 }
 
 type wsSelector interface {
@@ -523,6 +539,7 @@ type credsSelector interface {
 
 type ec2Client interface {
 	HasDNSSupport(vpcID string) (bool, error)
+	ListAZs() ([]ec2.AZ, error)
 }
 
 type serviceResumer interface {
@@ -545,16 +562,8 @@ type serviceDescriber interface {
 	DescribeService(app, env, svc string) (*ecs.ServiceDesc, error)
 }
 
-type serviceUpdater interface {
-	ForceUpdateService(app, env, svc string) error
-}
-
-type serviceDeployer interface {
-	DeployService(out termprogress.FileWriter, conf cloudformation.StackConfiguration, opts ...awscloudformation.StackOption) error
-}
-
 type apprunnerServiceDescriber interface {
-	ServiceARN() (string, error)
+	ServiceARN(env string) (string, error)
 }
 
 type ecsCommandExecutor interface {
@@ -596,7 +605,7 @@ type runningTaskSelector interface {
 
 type dockerEngine interface {
 	CheckDockerEngineRunning() error
-	RedirectPlatform(string) (*string, error)
+	GetPlatform() (string, string, error)
 }
 
 type codestar interface {
@@ -619,7 +628,23 @@ type servicePauser interface {
 	PauseService(svcARN string) error
 }
 
-type timeoutError interface {
-	error
-	Timeout() bool
+type interpolator interface {
+	Interpolate(s string) (string, error)
+}
+
+type workloadDeployer interface {
+	UploadArtifacts() (*clideploy.UploadArtifactsOutput, error)
+	DeployWorkload(in *clideploy.DeployWorkloadInput) (clideploy.ActionRecommender, error)
+	IsServiceAvailableInRegion(region string) (bool, error)
+}
+
+type workloadTemplateGenerator interface {
+	UploadArtifacts() (*clideploy.UploadArtifactsOutput, error)
+	GenerateCloudFormationTemplate(in *clideploy.GenerateCloudFormationTemplateInput) (
+		*clideploy.GenerateCloudFormationTemplateOutput, error)
+}
+
+type envDeployer interface {
+	DeployEnvironment(in *clideploy.DeployEnvironmentInput) error
+	UploadArtifacts() (map[string]string, error)
 }

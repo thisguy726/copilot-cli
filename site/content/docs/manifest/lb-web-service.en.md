@@ -3,61 +3,66 @@ List of all available properties for a `'Load Balanced Web Service'` manifest. T
 ???+ note "Sample manifest for a frontend service"
 
     ```yaml
-    # Your service name will be used in naming your resources like log groups, ECS services, etc.
-    name: frontend
-    type: Load Balanced Web Service
+        # Your service name will be used in naming your resources like log groups, ECS services, etc.
+        name: frontend
+        type: Load Balanced Web Service
 
-    # Distribute traffic to your service.
-    http:
-      path: '/'
-      healthcheck:
-        path: '/_healthcheck'
-        success_codes: '200,301'
-        healthy_threshold: 3
-        unhealthy_threshold: 2
-        interval: 15s
-        timeout: 10s
-        grace_period: 45s
-      deregistration_delay: 5s
-      stickiness: false
-      allowed_source_ips: ["10.24.34.0/23"]
-      alias: example.com
+        # Distribute traffic to your service.
+        http:
+          path: '/'
+          healthcheck:
+            path: '/_healthcheck'
+            port: 8080
+            success_codes: '200,301'
+            healthy_threshold: 3
+            unhealthy_threshold: 2
+            interval: 15s
+            timeout: 10s
+            grace_period: 45s
+          deregistration_delay: 5s
+          stickiness: false
+          allowed_source_ips: ["10.24.34.0/23"]
+          alias: example.com
 
-    # Configuration for your containers and service.
-    image:
-      build:
-        dockerfile: ./frontend/Dockerfile
-        context: ./frontend
-      port: 80
+        nlb:
+          port: 443/tls
 
-    cpu: 256
-    memory: 512
-    count:
-      range: 1-10
-      cpu_percentage: 70
-      memory_percentage: 80
-      requests: 10000
-      response_time: 2s
-    exec: true
+        # Configuration for your containers and service.
+        image:
+          build:
+            dockerfile: ./frontend/Dockerfile
+            context: ./frontend
+          port: 80
 
-    variables:
-      LOG_LEVEL: info
-    secrets:
-      GITHUB_TOKEN: GITHUB_TOKEN
-
-    # You can override any of the values defined above by environment.
-    environments:
-      test:
+        cpu: 256
+        memory: 512
         count:
-          range:
-            min: 1
-            max: 10
-            spot_from: 2
-      staging:
-        count:
-          spot: 2
-      production:
-        count: 2
+          range: 1-10
+          cpu_percentage: 70
+          memory_percentage: 80
+          requests: 10000
+          response_time: 2s
+        exec: true
+
+        variables:
+          LOG_LEVEL: info
+        env_file: log.env
+        secrets:
+          GITHUB_TOKEN: GITHUB_TOKEN
+
+        # You can override any of the values defined above by environment.
+        environments:
+          test:
+            count:
+              range:
+                min: 1
+                max: 10
+                spot_from: 2
+          staging:
+            count:
+              spot: 2
+          production:
+            count: 2
     ```
 
 <a id="name" href="#name" class="field">`name`</a> <span class="type">String</span>  
@@ -68,9 +73,67 @@ The name of your service.
 <a id="type" href="#type" class="field">`type`</a> <span class="type">String</span>  
 The architecture type for your service. A [Load Balanced Web Service](../concepts/services.en.md#load-balanced-web-service) is an internet-facing service that's behind a load balancer, orchestrated by Amazon ECS on AWS Fargate.
 
-{% include 'http-config.en.md' %}
+<div class="separator"></div>
 
-{% include 'image-config.en.md' %}
+<a id="http" href="#http" class="field">`http`</a> <span class="type">Boolean or Map</span>  
+The http section contains parameters related to integrating your service with an Application Load Balancer.
+
+To disable the Application Load Balancer, specify `http: false`. Note that for a Load-Balanced Web Service,
+at least one of Application Load Balancer or Network Load Balancer must be enabled.
+
+<span class="parent-field">http.</span><a id="http-path" href="#http-path" class="field">`path`</a> <span class="type">String</span>  
+Requests to this path will be forwarded to your service. Each Load Balanced Web Service should listen on a unique path.
+
+{% include 'http-healthcheck.en.md' %}
+
+<span class="parent-field">http.</span><a id="http-deregistration-delay" href="#http-deregistration-delay" class="field">`deregistration_delay`</a> <span class="type">Duration</span>  
+The amount of time to wait for targets to drain connections during deregistration. The default is 60s. Setting this to a larger value gives targets more time to gracefully drain connections, but increases the time required for new deployments. Range 0s-3600s.
+
+<span class="parent-field">http.</span><a id="http-target-container" href="#http-target-container" class="field">`target_container`</a> <span class="type">String</span>  
+A sidecar container that takes the place of a service container.
+
+<span class="parent-field">http.</span><a id="http-stickiness" href="#http-stickiness" class="field">`stickiness`</a> <span class="type">Boolean</span>  
+Indicates whether sticky sessions are enabled.
+
+<span class="parent-field">http.</span><a id="http-allowed-source-ips" href="#http-allowed-source-ips" class="field">`allowed_source_ips`</a> <span class="type">Array of Strings</span>  
+CIDR IP addresses permitted to access your service.
+```yaml
+http:
+allowed_source_ips: ["192.0.2.0/24", "198.51.100.10/32"]
+```
+
+<span class="parent-field">http.</span><a id="http-alias" href="#http-alias" class="field">`alias`</a> <span class="type">String or Array of Strings or Array of Maps</span>  
+HTTPS domain alias of your service.
+```yaml
+# String version.
+http:
+  alias: example.com
+# Alternatively, as an array of strings.
+http:
+  alias: ["example.com", "v1.example.com"]
+# Alternatively, as an array of maps.
+http:
+  alias:
+    - name: example.com
+      hosted_zone: Z0873220N255IR3MTNR4
+    - name: v1.example.com
+      hosted_zone: AN0THE9H05TED20NEID
+```
+<span class="parent-field">http.</span><a id="http-hosted-zone" href="#http-hosted-zone" class="field">`hosted_zone`</a> <span class="type">String</span>  
+ID of your existing hosted zone; must be used with `http.alias`. If you have an environment with imported certificates, you can specify the hosted zone into which Copilot should insert the A record once the load balancer is created.
+```yaml
+http:
+  alias: example.com
+  hosted_zone: Z0873220N255IR3MTNR4
+# Also see http.alias array of maps example, above.
+```
+<span class="parent-field">http.</span><a id="http-version" href="#http-version" class="field">`version`</a> <span class="type">String</span>  
+The HTTP(S) protocol version. Must be one of `'grpc'`, `'http1'`, or `'http2'`. If omitted, then `'http1'` is assumed.
+If using gRPC, please note that a domain must be associated with your application.
+
+{% include 'nlb.en.md' %}
+
+{% include 'image-config-with-port.en.md' %}
 
 {% include 'image-healthcheck.en.md' %}
 
@@ -94,6 +157,8 @@ If you want to use Fargate Spot capacity to run your services, you can specify a
 count:
   spot: 5
 ```
+!!! info
+    Fargate Spot is not supported for containers running on ARM architecture.
 
 <div class="separator"></div>
 
@@ -143,12 +208,14 @@ Scale up or down based on the average CPU your service should maintain.
 Scale up or down based on the average memory your service should maintain.
 
 <span class="parent-field">count.</span><a id="requests" href="#count-requests" class="field">`requests`</a> <span class="type">Integer</span>  
-Scale up or down based on the request count handled per tasks.
+Scale up or down based on the request count handled per task.
 
 <span class="parent-field">count.</span><a id="response-time" href="#count-response-time" class="field">`response_time`</a> <span class="type">Duration</span>  
 Scale up or down based on the service average response time.
 
 {% include 'exec.en.md' %}
+
+{% include 'deployment.en.md' %}
 
 {% include 'entrypoint.en.md' %}
 
@@ -165,6 +232,8 @@ Scale up or down based on the service average response time.
 {% include 'publish.en.md' %}
 
 {% include 'logging.en.md' %}
+
+{% include 'observability.en.md' %}
 
 {% include 'taskdef-overrides.en.md' %}
 

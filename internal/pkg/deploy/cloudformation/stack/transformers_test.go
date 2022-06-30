@@ -4,6 +4,7 @@
 package stack
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -18,16 +19,14 @@ import (
 
 func Test_convertSidecar(t *testing.T) {
 	mockImage := aws.String("mockImage")
-	mockWorkloadName := "frontend"
 	mockMap := map[string]string{"foo": "bar"}
+	mockSecrets := map[string]template.Secret{"foo": template.SecretFromSSMOrARN("")}
 	mockCredsParam := aws.String("mockCredsParam")
-	circularDependencyErr := fmt.Errorf("circular container dependency chain includes the following containers: ")
 	testCases := map[string]struct {
 		inPort            *string
 		inEssential       bool
 		inLabels          map[string]string
 		inDependsOn       map[string]string
-		inImg             manifest.Image
 		inImageOverride   manifest.ImageOverride
 		inHealthCheck     manifest.ContainerHealthCheck
 		circDepContainers []string
@@ -49,7 +48,7 @@ func Test_convertSidecar(t *testing.T) {
 				Port:       aws.String("2000"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(true),
 			},
@@ -64,51 +63,12 @@ func Test_convertSidecar(t *testing.T) {
 				Protocol:   aws.String("udp"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(true),
 			},
 		},
-		"invalid container dependency due to circularly depending on itself": {
-			inPort:      aws.String("2000"),
-			inEssential: true,
-			inDependsOn: map[string]string{
-				"foo": "start",
-			},
-
-			wantedErr: fmt.Errorf("container foo cannot depend on itself"),
-		},
-		"invalid container dependency due to circularly depending on another container": {
-			inPort:      aws.String("2000"),
-			inEssential: true,
-			inDependsOn: map[string]string{
-				"frontend": "start",
-			},
-			inImg: manifest.Image{
-				DependsOn: map[string]string{
-					"foo": "start",
-				},
-			},
-			wantedErr:         circularDependencyErr,
-			circDepContainers: []string{"frontend", "foo"},
-		},
-		"invalid container dependency status": {
-			inPort:      aws.String("2000"),
-			inEssential: true,
-			inDependsOn: map[string]string{
-				"frontend": "never",
-			},
-			wantedErr: errInvalidDependsOnStatus,
-		},
-		"invalid essential container dependency status": {
-			inPort:      aws.String("2000"),
-			inEssential: true,
-			inDependsOn: map[string]string{
-				"frontend": "complete",
-			},
-			wantedErr: errEssentialContainerStatus,
-		},
-		"good essential container dependencies": {
+		"good container dependencies": {
 			inPort:      aws.String("2000"),
 			inEssential: true,
 			inDependsOn: map[string]string{
@@ -120,27 +80,9 @@ func Test_convertSidecar(t *testing.T) {
 				Port:       aws.String("2000"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(true),
-				DependsOn: map[string]string{
-					"frontend": "START",
-				},
-			},
-		},
-		"good nonessential container dependencies": {
-			inEssential: false,
-			inDependsOn: map[string]string{
-				"frontend": "start",
-			},
-
-			wanted: &template.SidecarOpts{
-				Name:       aws.String("foo"),
-				CredsParam: mockCredsParam,
-				Image:      mockImage,
-				Secrets:    mockMap,
-				Variables:  mockMap,
-				Essential:  aws.Bool(false),
 				DependsOn: map[string]string{
 					"frontend": "START",
 				},
@@ -158,7 +100,7 @@ func Test_convertSidecar(t *testing.T) {
 				Port:       aws.String("2000"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				DockerLabels: map[string]string{
@@ -171,7 +113,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				EntryPoint: nil,
@@ -187,7 +129,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				EntryPoint: []string{"bin"},
@@ -203,7 +145,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				EntryPoint: []string{"bin", "arg"},
@@ -219,7 +161,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				EntryPoint: nil,
@@ -235,7 +177,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				EntryPoint: nil,
@@ -251,7 +193,7 @@ func Test_convertSidecar(t *testing.T) {
 				Name:       aws.String("foo"),
 				CredsParam: mockCredsParam,
 				Image:      mockImage,
-				Secrets:    mockMap,
+				Secrets:    mockSecrets,
 				Variables:  mockMap,
 				Essential:  aws.Bool(false),
 				HealthCheck: &template.ContainerHealthCheck{
@@ -270,7 +212,7 @@ func Test_convertSidecar(t *testing.T) {
 				"foo": {
 					CredsParam:    mockCredsParam,
 					Image:         mockImage,
-					Secrets:       mockMap,
+					Secrets:       map[string]manifest.Secret{"foo": {}},
 					Variables:     mockMap,
 					Essential:     aws.Bool(tc.inEssential),
 					Port:          tc.inPort,
@@ -280,18 +222,9 @@ func Test_convertSidecar(t *testing.T) {
 					HealthCheck:   tc.inHealthCheck,
 				},
 			}
-			got, err := convertSidecar(convertSidecarOpts{
-				sidecarConfig: sidecar,
-				imageConfig:   &tc.inImg,
-				workloadName:  mockWorkloadName,
-			})
+			got, err := convertSidecar(sidecar)
 
-			if tc.wantedErr == circularDependencyErr {
-				require.Contains(t, err.Error(), circularDependencyErr.Error())
-				for _, container := range tc.circDepContainers {
-					require.Contains(t, err.Error(), container)
-				}
-			} else if tc.wantedErr != nil {
+			if tc.wantedErr != nil {
 				require.EqualError(t, err, tc.wantedErr.Error())
 			} else {
 				require.NoError(t, err)
@@ -303,22 +236,60 @@ func Test_convertSidecar(t *testing.T) {
 
 func Test_convertAdvancedCount(t *testing.T) {
 	mockRange := manifest.IntRangeBand("1-10")
-	mockPerc := manifest.Percentage(70)
+	timeMinute := time.Second * 60
+	perc := manifest.Percentage(70)
+	mockConfig := manifest.ScalingConfigOrT[manifest.Percentage]{
+		ScalingConfig: manifest.AdvancedScalingConfig[manifest.Percentage]{
+			Value: &perc,
+			Cooldown: manifest.Cooldown{
+				ScaleInCooldown: &timeMinute,
+			},
+		},
+	}
 	testCases := map[string]struct {
-		input       *manifest.AdvancedCount
+		input       manifest.AdvancedCount
 		expected    *template.AdvancedCount
 		expectedErr error
 	}{
-		"returns nil if nil": {
-			input:    nil,
-			expected: nil,
-		},
-		"returns nil if empty": {
-			input:    &manifest.AdvancedCount{},
-			expected: nil,
+		"success with generalized cooldown": {
+			input: manifest.AdvancedCount{
+				Range: manifest.Range{
+					Value: &mockRange,
+				},
+				Cooldown: manifest.Cooldown{
+					ScaleInCooldown:  &timeMinute,
+					ScaleOutCooldown: &timeMinute,
+				},
+			},
+			expected: &template.AdvancedCount{
+				Autoscaling: &template.AutoscalingOpts{
+					MinCapacity: aws.Int(1),
+					MaxCapacity: aws.Int(10),
+					CPUCooldown: template.Cooldown{
+						ScaleInCooldown:  aws.Float64(60),
+						ScaleOutCooldown: aws.Float64(60),
+					},
+					MemCooldown: template.Cooldown{
+						ScaleInCooldown:  aws.Float64(60),
+						ScaleOutCooldown: aws.Float64(60),
+					},
+					ReqCooldown: template.Cooldown{
+						ScaleInCooldown:  aws.Float64(60),
+						ScaleOutCooldown: aws.Float64(60),
+					},
+					RespTimeCooldown: template.Cooldown{
+						ScaleInCooldown:  aws.Float64(60),
+						ScaleOutCooldown: aws.Float64(60),
+					},
+					QueueDelayCooldown: template.Cooldown{
+						ScaleInCooldown:  aws.Float64(60),
+						ScaleOutCooldown: aws.Float64(60),
+					},
+				},
+			},
 		},
 		"success with spot count": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Spot: aws.Int(1),
 			},
 			expected: &template.AdvancedCount{
@@ -332,22 +303,25 @@ func Test_convertAdvancedCount(t *testing.T) {
 			},
 		},
 		"success with fargate autoscaling": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					Value: &mockRange,
 				},
-				CPU: &mockPerc,
+				CPU: mockConfig,
 			},
 			expected: &template.AdvancedCount{
 				Autoscaling: &template.AutoscalingOpts{
 					MinCapacity: aws.Int(1),
 					MaxCapacity: aws.Int(10),
 					CPU:         aws.Float64(70),
+					CPUCooldown: template.Cooldown{
+						ScaleInCooldown: aws.Float64(60),
+					},
 				},
 			},
 		},
 		"success with spot autoscaling": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					RangeConfig: manifest.RangeConfig{
 						Min:      aws.Int(2),
@@ -355,13 +329,16 @@ func Test_convertAdvancedCount(t *testing.T) {
 						SpotFrom: aws.Int(5),
 					},
 				},
-				CPU: &mockPerc,
+				CPU: mockConfig,
 			},
 			expected: &template.AdvancedCount{
 				Autoscaling: &template.AutoscalingOpts{
 					MinCapacity: aws.Int(2),
 					MaxCapacity: aws.Int(20),
 					CPU:         aws.Float64(70),
+					CPUCooldown: template.Cooldown{
+						ScaleInCooldown: aws.Float64(60),
+					},
 				},
 				Cps: []*template.CapacityProviderStrategy{
 					{
@@ -396,12 +373,11 @@ func Test_convertCapacityProviders(t *testing.T) {
 	minCapacity := 1
 	spotFrom := 3
 	testCases := map[string]struct {
-		input       *manifest.AdvancedCount
-		expected    []*template.CapacityProviderStrategy
-		expectedErr error
+		input    manifest.AdvancedCount
+		expected []*template.CapacityProviderStrategy
 	}{
 		"with spot as desiredCount": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Spot: aws.Int(3),
 			},
 
@@ -413,7 +389,7 @@ func Test_convertCapacityProviders(t *testing.T) {
 			},
 		},
 		"with scaling only on spot": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					RangeConfig: manifest.RangeConfig{
 						Min:      aws.Int(minCapacity),
@@ -431,7 +407,7 @@ func Test_convertCapacityProviders(t *testing.T) {
 			},
 		},
 		"with scaling into spot": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					RangeConfig: manifest.RangeConfig{
 						Min:      aws.Int(minCapacity),
@@ -454,58 +430,71 @@ func Test_convertCapacityProviders(t *testing.T) {
 			},
 		},
 		"returns nil if no spot config specified": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					Value: &mockRange,
 				},
 			},
 			expected: nil,
 		},
-		"errors if spot specified with range": {
-			input: &manifest.AdvancedCount{
+		"returns nil if no spot config specified with min max": {
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
-					Value: &mockRange,
+					RangeConfig: manifest.RangeConfig{
+						Min: aws.Int(1),
+						Max: aws.Int(10),
+					},
 				},
-				Spot: aws.Int(3),
 			},
-			expectedErr: errInvalidSpotConfig,
+			expected: nil,
 		},
 	}
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			actual, err := convertCapacityProviders(tc.input)
-
-			if tc.expectedErr != nil {
-				require.EqualError(t, err, tc.expectedErr.Error())
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.expected, actual)
-			}
+			actual := convertCapacityProviders(tc.input)
+			require.Equal(t, tc.expected, actual)
 		})
 	}
 }
 
 func Test_convertAutoscaling(t *testing.T) {
 	var (
-		mockRange        = manifest.IntRangeBand("1-100")
-		badRange         = manifest.IntRangeBand("badRange")
-		mockRequests     = 1000
-		mockResponseTime = 512 * time.Millisecond
-		mockCPU          = manifest.Percentage(70)
-		mockMem          = manifest.Percentage(80)
+		respTime     = 512 * time.Millisecond
+		mockRange    = manifest.IntRangeBand("1-100")
+		badRange     = manifest.IntRangeBand("badRange")
+		mockRequests = manifest.ScalingConfigOrT[int]{
+			Value: aws.Int(1000),
+		}
+		mockResponseTime = manifest.ScalingConfigOrT[time.Duration]{
+			Value: &respTime,
+		}
+		perc       = manifest.Percentage(70)
+		timeMinute = time.Second * 60
+		mockCPU    = manifest.ScalingConfigOrT[manifest.Percentage]{
+			ScalingConfig: manifest.AdvancedScalingConfig[manifest.Percentage]{
+				Value: &perc,
+				Cooldown: manifest.Cooldown{
+					ScaleInCooldown:  &timeMinute,
+					ScaleOutCooldown: &timeMinute,
+				},
+			},
+		}
+		mockMem = manifest.ScalingConfigOrT[manifest.Percentage]{
+			Value: &perc,
+		}
 	)
 
 	testAcceptableLatency := 10 * time.Minute
 	testAvgProcessingTime := 250 * time.Millisecond
 	testCases := map[string]struct {
-		input *manifest.AdvancedCount
+		input manifest.AdvancedCount
 
 		wanted    *template.AutoscalingOpts
 		wantedErr error
 	}{
 		"invalid range": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					Value: &badRange,
 				},
@@ -514,27 +503,31 @@ func Test_convertAutoscaling(t *testing.T) {
 			wantedErr: fmt.Errorf("invalid range value badRange. Should be in format of ${min}-${max}"),
 		},
 		"success": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					Value: &mockRange,
 				},
-				CPU:          &mockCPU,
-				Memory:       &mockMem,
-				Requests:     aws.Int(mockRequests),
-				ResponseTime: &mockResponseTime,
+				CPU:          mockCPU,
+				Memory:       mockMem,
+				Requests:     mockRequests,
+				ResponseTime: mockResponseTime,
 			},
 
 			wanted: &template.AutoscalingOpts{
-				MaxCapacity:  aws.Int(100),
-				MinCapacity:  aws.Int(1),
-				CPU:          aws.Float64(70),
-				Memory:       aws.Float64(80),
+				MaxCapacity: aws.Int(100),
+				MinCapacity: aws.Int(1),
+				CPU:         aws.Float64(70),
+				Memory:      aws.Float64(70),
+				CPUCooldown: template.Cooldown{
+					ScaleInCooldown:  aws.Float64(60),
+					ScaleOutCooldown: aws.Float64(60),
+				},
 				Requests:     aws.Float64(1000),
 				ResponseTime: aws.Float64(0.512),
 			},
 		},
 		"success with range subfields": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					RangeConfig: manifest.RangeConfig{
 						Min:      aws.Int(5),
@@ -542,23 +535,27 @@ func Test_convertAutoscaling(t *testing.T) {
 						SpotFrom: aws.Int(5),
 					},
 				},
-				CPU:          &mockCPU,
-				Memory:       &mockMem,
-				Requests:     aws.Int(mockRequests),
-				ResponseTime: &mockResponseTime,
+				CPU:          mockCPU,
+				Memory:       mockMem,
+				Requests:     mockRequests,
+				ResponseTime: mockResponseTime,
 			},
 
 			wanted: &template.AutoscalingOpts{
-				MaxCapacity:  aws.Int(10),
-				MinCapacity:  aws.Int(5),
-				CPU:          aws.Float64(70),
-				Memory:       aws.Float64(80),
+				MaxCapacity: aws.Int(10),
+				MinCapacity: aws.Int(5),
+				CPU:         aws.Float64(70),
+				Memory:      aws.Float64(70),
+				CPUCooldown: template.Cooldown{
+					ScaleInCooldown:  aws.Float64(60),
+					ScaleOutCooldown: aws.Float64(60),
+				},
 				Requests:     aws.Float64(1000),
 				ResponseTime: aws.Float64(0.512),
 			},
 		},
 		"success with queue autoscaling": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Range: manifest.Range{
 					RangeConfig: manifest.RangeConfig{
 						Min:      aws.Int(5),
@@ -569,18 +566,24 @@ func Test_convertAutoscaling(t *testing.T) {
 				QueueScaling: manifest.QueueScaling{
 					AcceptableLatency: &testAcceptableLatency,
 					AvgProcessingTime: &testAvgProcessingTime,
+					Cooldown: manifest.Cooldown{
+						ScaleInCooldown: &timeMinute,
+					},
 				},
 			},
 			wanted: &template.AutoscalingOpts{
 				MaxCapacity: aws.Int(10),
 				MinCapacity: aws.Int(5),
+				QueueDelayCooldown: template.Cooldown{
+					ScaleInCooldown: aws.Float64(60),
+				},
 				QueueDelay: &template.AutoscalingQueueDelayOpts{
 					AcceptableBacklogPerTask: 2400,
 				},
 			},
 		},
 		"returns nil if spot specified": {
-			input: &manifest.AdvancedCount{
+			input: manifest.AdvancedCount{
 				Spot: aws.Int(5),
 			},
 			wanted: nil,
@@ -612,14 +615,6 @@ func Test_convertTaskDefOverrideRules(t *testing.T) {
 					Path:  "ContainerDefinitions[0].Ulimits[-].HardLimit",
 					Value: yaml.Node{},
 				},
-				{
-					Path:  "ContainerDefinitions[0].Name",
-					Value: yaml.Node{},
-				},
-				{
-					Path:  "Family",
-					Value: yaml.Node{},
-				},
 			},
 			wanted: []override.Rule{
 				{
@@ -644,6 +639,7 @@ func Test_convertHTTPHealthCheck(t *testing.T) {
 	duration60Seconds := 60 * time.Second
 	testCases := map[string]struct {
 		inputPath               *string
+		inputPort               *int
 		inputSuccessCodes       *string
 		inputHealthyThreshold   *int64
 		inputUnhealthyThreshold *int64
@@ -742,8 +738,19 @@ func Test_convertHTTPHealthCheck(t *testing.T) {
 				GracePeriod:     aws.Int64(60),
 			},
 		},
+		"just Port": {
+			inputPath: nil,
+			inputPort: aws.Int(8000),
+
+			wantedOpts: template.HTTPHealthCheckOpts{
+				HealthCheckPath: "/",
+				Port:            "8000",
+				GracePeriod:     aws.Int64(60),
+			},
+		},
 		"all values changed in manifest": {
 			inputPath:               aws.String("/road/to/nowhere"),
+			inputPort:               aws.Int(8080),
 			inputSuccessCodes:       aws.String("200-299"),
 			inputHealthyThreshold:   aws.Int64(3),
 			inputUnhealthyThreshold: aws.Int64(3),
@@ -753,6 +760,7 @@ func Test_convertHTTPHealthCheck(t *testing.T) {
 
 			wantedOpts: template.HTTPHealthCheckOpts{
 				HealthCheckPath:    "/road/to/nowhere",
+				Port:               "8080",
 				SuccessCodes:       "200-299",
 				HealthyThreshold:   aws.Int64(3),
 				UnhealthyThreshold: aws.Int64(3),
@@ -769,6 +777,7 @@ func Test_convertHTTPHealthCheck(t *testing.T) {
 				HealthCheckPath: tc.inputPath,
 				HealthCheckArgs: manifest.HTTPHealthCheckArgs{
 					Path:               tc.inputPath,
+					Port:               tc.inputPort,
 					SuccessCodes:       tc.inputSuccessCodes,
 					HealthyThreshold:   tc.inputHealthyThreshold,
 					UnhealthyThreshold: tc.inputUnhealthyThreshold,
@@ -791,7 +800,6 @@ func Test_convertManagedFSInfo(t *testing.T) {
 		inVolumes         map[string]*manifest.Volume
 		wantManagedConfig *template.ManagedVolumeCreationInfo
 		wantVolumes       map[string]manifest.Volume
-		wantErr           string
 	}{
 		"no managed config": {
 			inVolumes: map[string]*manifest.Volume{
@@ -865,15 +873,10 @@ func Test_convertManagedFSInfo(t *testing.T) {
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
 			// WHEN
-			gotManaged, err := convertManagedFSInfo(aws.String("fe"), tc.inVolumes)
+			gotManaged := convertManagedFSInfo(aws.String("fe"), tc.inVolumes)
 
 			// THEN
-			if tc.wantErr != "" {
-				require.EqualError(t, err, tc.wantErr)
-			} else {
-				require.NoError(t, err)
-				require.Equal(t, tc.wantManagedConfig, gotManaged)
-			}
+			require.Equal(t, tc.wantManagedConfig, gotManaged)
 		})
 	}
 }
@@ -882,7 +885,6 @@ func Test_convertStorageOpts(t *testing.T) {
 		inVolumes   map[string]*manifest.Volume
 		inEphemeral *int
 		wantOpts    template.StorageOpts
-		wantErr     string
 	}{
 		"minimal configuration": {
 			inVolumes: map[string]*manifest.Volume{
@@ -948,18 +950,6 @@ func Test_convertStorageOpts(t *testing.T) {
 					},
 				},
 			},
-		},
-		"container path not specified": {
-			inVolumes: map[string]*manifest.Volume{
-				"wordpress": {
-					EFS: manifest.EFSConfigOrBool{
-						Advanced: manifest.EFSVolumeConfiguration{
-							FileSystemID: aws.String("fs-1234"),
-						},
-					},
-				},
-			},
-			wantErr: fmt.Sprintf("validate container configuration for volume wordpress: %s", errNoContainerPath.Error()),
 		},
 		"full specification with access point renders correctly": {
 			inVolumes: map[string]*manifest.Volume{
@@ -1111,28 +1101,6 @@ func Test_convertStorageOpts(t *testing.T) {
 				},
 			},
 		},
-		"error when multiple managed volumes specified": {
-			inVolumes: map[string]*manifest.Volume{
-				"efs": {
-					EFS: manifest.EFSConfigOrBool{
-						Enabled: aws.Bool(true),
-					},
-					MountPointOpts: manifest.MountPointOpts{
-						ContainerPath: aws.String("/var/www"),
-						ReadOnly:      aws.Bool(true),
-					},
-				},
-				"wordpress": {
-					EFS: manifest.EFSConfigOrBool{
-						Enabled: aws.Bool(true),
-					},
-					MountPointOpts: manifest.MountPointOpts{
-						ContainerPath: aws.String("/var/abc"),
-					},
-				},
-			},
-			wantErr: "cannot specify more than one managed volume per service",
-		},
 		"managed EFS and BYO": {
 			inVolumes: map[string]*manifest.Volume{
 				"efs": {
@@ -1258,18 +1226,13 @@ func Test_convertStorageOpts(t *testing.T) {
 			}
 
 			// WHEN
-			got, err := convertStorageOpts(aws.String("fe"), s)
+			got := convertStorageOpts(aws.String("fe"), s)
 
 			// THEN
-			if tc.wantErr != "" {
-				require.EqualError(t, err, tc.wantErr)
-			} else {
-				require.NoError(t, err)
-				require.ElementsMatch(t, tc.wantOpts.EFSPerms, got.EFSPerms)
-				require.ElementsMatch(t, tc.wantOpts.MountPoints, got.MountPoints)
-				require.ElementsMatch(t, tc.wantOpts.Volumes, got.Volumes)
-				require.Equal(t, tc.wantOpts.ManagedVolumeInfo, got.ManagedVolumeInfo)
-			}
+			require.ElementsMatch(t, tc.wantOpts.EFSPerms, got.EFSPerms)
+			require.ElementsMatch(t, tc.wantOpts.MountPoints, got.MountPoints)
+			require.ElementsMatch(t, tc.wantOpts.Volumes, got.Volumes)
+			require.Equal(t, tc.wantOpts.ManagedVolumeInfo, got.ManagedVolumeInfo)
 		})
 	}
 }
@@ -1312,7 +1275,6 @@ func Test_convertExecuteCommand(t *testing.T) {
 func Test_convertSidecarMountPoints(t *testing.T) {
 	testCases := map[string]struct {
 		inMountPoints  []manifest.SidecarMountPoint
-		wantErr        string
 		wantMountPoint []*template.MountPoint
 	}{
 		"fully specified": {
@@ -1350,49 +1312,13 @@ func Test_convertSidecarMountPoints(t *testing.T) {
 				},
 			},
 		},
-		"error when source not specified": {
-			inMountPoints: []manifest.SidecarMountPoint{
-				{
-					MountPointOpts: manifest.MountPointOpts{
-						ContainerPath: aws.String("/var/www/wp-content"),
-						ReadOnly:      aws.Bool(false),
-					},
-				},
-			},
-			wantErr: errNoSourceVolume.Error(),
-		},
-		"error when path not specified": {
-			inMountPoints: []manifest.SidecarMountPoint{
-				{
-					SourceVolume: aws.String("wordpress"),
-					MountPointOpts: manifest.MountPointOpts{
-						ReadOnly: aws.Bool(false),
-					},
-				},
-			},
-			wantErr: errNoContainerPath.Error(),
-		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			err := validateSidecarMountPoints(tc.inMountPoints)
-			if tc.wantErr != "" {
-				require.EqualError(t, err, tc.wantErr)
-			} else {
-				require.NoError(t, err)
-				got := convertSidecarMountPoints(tc.inMountPoints)
-				require.Equal(t, tc.wantMountPoint, got)
-			}
+			got := convertSidecarMountPoints(tc.inMountPoints)
+			require.Equal(t, tc.wantMountPoint, got)
 		})
 	}
-}
-
-func Test_validatePaths(t *testing.T) {
-	t.Run("containerPath should be properly validated", func(t *testing.T) {
-		require.NoError(t, validateContainerPath("/abc/90_"), "contains underscore")
-		require.EqualError(t, validateContainerPath("/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), "path must be less than 242 bytes in length", "too long")
-		require.EqualError(t, validateContainerPath("/etc /bin/sh cat `i'm evil` > /dev/null"), "paths can only contain the characters a-zA-Z0-9.-_/", "invalid characters disallowed")
-	})
 }
 
 func Test_convertEphemeral(t *testing.T) {
@@ -1406,14 +1332,6 @@ func Test_convertEphemeral(t *testing.T) {
 			inEphemeral: nil,
 			wanted:      nil,
 		},
-		"ephemeral errors when size is too big": {
-			inEphemeral: aws.Int(25000),
-			wantedError: errEphemeralBadSize,
-		},
-		"ephemeral errors when size is too small": {
-			inEphemeral: aws.Int(10),
-			wantedError: errEphemeralBadSize,
-		},
 		"ephemeral specified correctly": {
 			inEphemeral: aws.Int(100),
 			wanted:      aws.Int(100),
@@ -1425,128 +1343,8 @@ func Test_convertEphemeral(t *testing.T) {
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			got, err := convertEphemeral(tc.inEphemeral)
-			if tc.wantedError != nil {
-				require.EqualError(t, err, tc.wantedError.Error())
-			} else {
-				require.Equal(t, got, tc.wanted)
-			}
-		})
-	}
-}
-
-func Test_convertImageDependsOn(t *testing.T) {
-	mockWorkloadName := "frontend"
-	circularDependencyErr := fmt.Errorf("circular container dependency chain includes the following containers: ")
-	testCases := map[string]struct {
-		inImage           *manifest.Image
-		inSidecars        map[string]*manifest.SidecarConfig
-		circDepContainers []string
-
-		wanted      map[string]string
-		wantedError error
-	}{
-		"no container dependencies": {
-			inImage: &manifest.Image{},
-			wanted:  nil,
-		},
-		"invalid container dependency due to circular dependency on itself": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"frontend": "start",
-				},
-			},
-			wantedError: fmt.Errorf("container frontend cannot depend on itself"),
-		},
-		"invalid container dependency due to circular dependency on a sidecar": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"sidecar": "start",
-				},
-			},
-			inSidecars: map[string]*manifest.SidecarConfig{
-				"sidecar": {
-					DependsOn: map[string]string{
-						"sidecar2": "start",
-					},
-				},
-				"sidecar2": {
-					DependsOn: map[string]string{
-						"frontend": "start",
-					},
-				},
-			},
-			wantedError:       circularDependencyErr,
-			circDepContainers: []string{"frontend", "sidecar", "sidecar2"},
-		},
-		"invalid container dependency due to status": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"sidecar": "end",
-				},
-			},
-			inSidecars: map[string]*manifest.SidecarConfig{
-				"sidecar": {
-					Essential: aws.Bool(false),
-				},
-			},
-			wantedError: errInvalidDependsOnStatus,
-		},
-		"invalid implied essential container depdendency": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"sidecar": "complete",
-				},
-			},
-			inSidecars: map[string]*manifest.SidecarConfig{
-				"sidecar": {},
-			},
-			wantedError: errEssentialContainerStatus,
-		},
-		"invalid set essential container depdendency": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"sidecar": "complete",
-				},
-			},
-			inSidecars: map[string]*manifest.SidecarConfig{
-				"sidecar": {
-					Essential: aws.Bool(true),
-				},
-			},
-			wantedError: errEssentialContainerStatus,
-		},
-		"good essential container dependency": {
-			inImage: &manifest.Image{
-				DependsOn: map[string]string{
-					"sidecar": "start",
-				},
-			},
-			inSidecars: map[string]*manifest.SidecarConfig{
-				"sidecar": {},
-			},
-			wanted: map[string]string{
-				"sidecar": "START",
-			},
-		},
-	}
-	for name, tc := range testCases {
-		t.Run(name, func(t *testing.T) {
-			got, err := convertImageDependsOn(convertSidecarOpts{
-				sidecarConfig: tc.inSidecars,
-				imageConfig:   tc.inImage,
-				workloadName:  mockWorkloadName,
-			})
-			if tc.wantedError == circularDependencyErr {
-				require.Contains(t, err.Error(), circularDependencyErr.Error())
-				for _, container := range tc.circDepContainers {
-					require.Contains(t, err.Error(), container)
-				}
-			} else if tc.wantedError != nil {
-				require.EqualError(t, err, tc.wantedError.Error())
-			} else {
-				require.Equal(t, got, tc.wanted)
-			}
+			got := convertEphemeral(tc.inEphemeral)
+			require.Equal(t, got, tc.wanted)
 		})
 	}
 }
@@ -1571,10 +1369,6 @@ func Test_convertPublish(t *testing.T) {
 		"empty manifest publishers should return nil": {
 			inTopics: []manifest.Topic{},
 			wanted:   nil,
-		},
-		"publish with no topic names": {
-			inTopics:    []manifest.Topic{{}},
-			wantedError: errMissingPublishTopicField,
 		},
 		"valid publish": {
 			inTopics: []manifest.Topic{
@@ -1609,14 +1403,6 @@ func Test_convertPublish(t *testing.T) {
 				},
 			},
 		},
-		"invalid topic name": {
-			inTopics: []manifest.Topic{
-				{
-					Name: aws.String("topic1~~@#$"),
-				},
-			},
-			wantedError: errInvalidPubSubTopicName,
-		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
@@ -1631,31 +1417,18 @@ func Test_convertPublish(t *testing.T) {
 }
 
 func Test_convertSubscribe(t *testing.T) {
-	validTopics := []string{"arn:aws:sns:us-west-2:123456789123:app-env-svc-name", "arn:aws:sns:us-west-2:123456789123:app-env-svc-name2"}
-	accountId := "123456789123"
-	region := "us-west-2"
-	app := "app"
-	env := "env"
-	svc := "svc"
 	duration111Seconds := 111 * time.Second
-	duration5Days := 120 * time.Hour
+	mockStruct := map[string]interface{}{
+		"store": []string{"example_corp"},
+	}
 	testCases := map[string]struct {
 		inSubscribe manifest.SubscribeConfig
 
-		wanted      *template.SubscribeOpts
-		wantedError error
+		wanted *template.SubscribeOpts
 	}{
 		"empty subscription": {
 			inSubscribe: manifest.SubscribeConfig{},
 			wanted:      nil,
-		},
-		"subscription with empty topic subscriptions": {
-			inSubscribe: manifest.SubscribeConfig{
-				Topics: []manifest.TopicSubscription{
-					{},
-				},
-			},
-			wantedError: fmt.Errorf(`invalid topic subscription "": %w`, errMissingPublishTopicField),
 		},
 		"valid subscribe": {
 			inSubscribe: manifest.SubscribeConfig{
@@ -1700,6 +1473,7 @@ func Test_convertSubscribe(t *testing.T) {
 						Queue: manifest.SQSQueueOrBool{
 							Enabled: aws.Bool(true),
 						},
+						FilterPolicy: mockStruct,
 					},
 				},
 				Queue: manifest.SQSQueue{},
@@ -1707,58 +1481,131 @@ func Test_convertSubscribe(t *testing.T) {
 			wanted: &template.SubscribeOpts{
 				Topics: []*template.TopicSubscription{
 					{
-						Name:    aws.String("name"),
-						Service: aws.String("svc"),
-						Queue:   &template.SQSQueue{},
+						Name:         aws.String("name"),
+						Service:      aws.String("svc"),
+						Queue:        &template.SQSQueue{},
+						FilterPolicy: aws.String(`{"store":["example_corp"]}`),
 					},
 				},
 				Queue: nil,
 			},
 		},
-		"invalid topic name": {
-			inSubscribe: manifest.SubscribeConfig{
-				Topics: []manifest.TopicSubscription{
-					{
-						Name:    aws.String("t@p!c1~"),
-						Service: aws.String("service1"),
-					},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got, err := convertSubscribe(tc.inSubscribe)
+			require.Equal(t, tc.wanted, got)
+			require.NoError(t, err)
+		})
+	}
+}
+
+func Test_convertPlatform(t *testing.T) {
+	testCases := map[string]struct {
+		in  manifest.PlatformArgsOrString
+		out template.RuntimePlatformOpts
+	}{
+		"should return empty struct if user did not set a platform field in the manifest": {},
+		"should return windows server 2019 full and x86_64 when advanced config specifies full": {
+			in: manifest.PlatformArgsOrString{
+				PlatformArgs: manifest.PlatformArgs{
+					OSFamily: aws.String(manifest.OSWindowsServer2019Full),
+					Arch:     aws.String(manifest.ArchX86),
 				},
 			},
-			wantedError: fmt.Errorf(`invalid topic subscription "t@p!c1~": %w`, errInvalidPubSubTopicName),
+			out: template.RuntimePlatformOpts{
+				OS:   template.OSWindowsServerFull,
+				Arch: template.ArchX86,
+			},
 		},
-		"invalid service name": {
-			inSubscribe: manifest.SubscribeConfig{
-				Topics: []manifest.TopicSubscription{
-					{
-						Name:    aws.String("topic1"),
-						Service: aws.String("s#rv!ce1~"),
-					},
-				},
+		"should return windows server core and x86_64 when platform is 'windows/x86_64'": {
+			in: manifest.PlatformArgsOrString{
+				PlatformString: (*manifest.PlatformString)(aws.String("windows/amd64")),
 			},
-			wantedError: fmt.Errorf(`invalid topic subscription "topic1": %w`, errSvcNameBadFormat),
+			out: template.RuntimePlatformOpts{
+				OS:   template.OSWindowsServerCore,
+				Arch: template.ArchX86,
+			},
 		},
-		"subscribe queue delay invalid": {
-			inSubscribe: manifest.SubscribeConfig{
-				Topics: []manifest.TopicSubscription{
-					{
-						Name:    aws.String("name"),
-						Service: aws.String("svc"),
-					},
-				},
-				Queue: manifest.SQSQueue{
-					Delay: &duration5Days,
-				},
+		"should return linux and x86_64 when platform is 'linux/amd64'": {
+			in: manifest.PlatformArgsOrString{
+				PlatformString: (*manifest.PlatformString)(aws.String("linux/amd64")),
 			},
-			wantedError: fmt.Errorf("`delay` must be between 0s and 15m0s"),
+			out: template.RuntimePlatformOpts{
+				OS:   template.OSLinux,
+				Arch: template.ArchX86,
+			},
+		},
+		"should return linux and arm when platform is 'linux/arm'": {
+			in: manifest.PlatformArgsOrString{
+				PlatformString: (*manifest.PlatformString)(aws.String("linux/arm")),
+			},
+			out: template.RuntimePlatformOpts{
+				OS:   template.OSLinux,
+				Arch: template.ArchARM64,
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.out, convertPlatform(tc.in))
+		})
+	}
+}
+
+func Test_convertHTTPVersion(t *testing.T) {
+	testCases := map[string]struct {
+		in     *string
+		wanted *string
+	}{
+		"should return nil if there is no user input": {},
+		"should return as uppercase on any user input": {
+			in:     aws.String("gRPC"),
+			wanted: aws.String("GRPC"),
 		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			got, err := convertSubscribe(tc.inSubscribe, validTopics, accountId, region, app, env, svc)
-			if tc.wantedError != nil {
-				require.EqualError(t, err, tc.wantedError.Error())
+			require.Equal(t, tc.wanted, convertHTTPVersion(tc.in))
+		})
+	}
+}
+
+func Test_convertCustomResources(t *testing.T) {
+	testCases := map[string]struct {
+		in        map[string]string
+		wanted    map[string]template.S3ObjectLocation
+		wantedErr error
+	}{
+		"returns a wrapped error if a url cannot be parsed": {
+			in: map[string]string{
+				"EnvControllerFunction":       "https://my-bucket.s3.us-west-2.amazonaws.com/puppy.png",
+				"DynamicDesiredCountFunction": "bad",
+			},
+			wantedErr: errors.New(`convert custom resource "DynamicDesiredCountFunction" url: cannot parse S3 URL bad into bucket name and key`),
+		},
+		"transforms custom resources with valid urls": {
+			in: map[string]string{
+				"EnvControllerFunction": "https://my-bucket.s3.us-west-2.amazonaws.com/good/dogs/puppy.png",
+			},
+			wanted: map[string]template.S3ObjectLocation{
+				"EnvControllerFunction": {
+					Bucket: "my-bucket",
+					Key:    "good/dogs/puppy.png",
+				},
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			out, err := convertCustomResources(tc.in)
+			if tc.wantedErr != nil {
+				require.EqualError(t, err, tc.wantedErr.Error())
 			} else {
-				require.Equal(t, tc.wanted, got)
+				require.NoError(t, err)
+				require.Equal(t, tc.wanted, out)
 			}
 		})
 	}

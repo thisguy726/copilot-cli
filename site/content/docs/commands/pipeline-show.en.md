@@ -1,5 +1,5 @@
 # pipeline show
-```bash
+```console
 $ copilot pipeline show [flags]
 ```
 
@@ -7,7 +7,7 @@ $ copilot pipeline show [flags]
 `copilot pipeline show` shows configuration information about a deployed pipeline for an application, including the account, region, and stages.
 
 ## What are the flags?
-```bash
+```
 -a, --app string    Name of the application.
 -h, --help          help for show
     --json          Optional. Outputs in JSON format.
@@ -16,9 +16,9 @@ $ copilot pipeline show [flags]
 ```
 
 ## Examples
-Shows info about the pipeline in the "myapp" application.
-```bash
-$ copilot pipeline show --app myapp --resources
+Shows info, including resources, about the pipeline "myrepo-mybranch."
+```console
+$ copilot pipeline show --name myrepo-mybranch --resources
 ```
 
 ## What does it look like?

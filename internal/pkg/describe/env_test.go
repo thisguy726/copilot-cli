@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/aws/copilot-cli/internal/pkg/aws/ec2"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 	cfstack "github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/describe/mocks"
 	"github.com/aws/copilot-cli/internal/pkg/describe/stack"
+	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/golang/mock/gomock"
 	"github.com/stretchr/testify/require"
 )
@@ -21,6 +23,7 @@ type envDescriberMocks struct {
 	configStoreSvc *mocks.MockConfigStoreSvc
 	deployStoreSvc *mocks.MockDeployedEnvServicesLister
 	stackDescriber *mocks.MockstackDescriber
+	subnetLister   *mocks.MockvpcSubnetLister
 }
 
 var wantedResources = []*stack.Resource{
@@ -61,6 +64,16 @@ func TestEnvDescriber_Describe(t *testing.T) {
 		Name: "testSvc3",
 		Type: "load-balanced",
 	}
+	testJob1 := &config.Workload{
+		App:  "testApp",
+		Name: "testJob1",
+		Type: "Scheduled Job",
+	}
+	testJob2 := &config.Workload{
+		App:  "testApp",
+		Name: "testJob2",
+		Type: "Scheduled Job",
+	}
 	stackTags := map[string]string{
 		"copilot-application": "testApp",
 		"copilot-environment": "testEnv",
@@ -79,6 +92,7 @@ func TestEnvDescriber_Describe(t *testing.T) {
 		Type:       "testApp-testEnv-Cluster",
 	}
 	envSvcs := []*config.Workload{testSvc1, testSvc2}
+	envJobs := []*config.Workload{testJob1, testJob2}
 	mockError := errors.New("some error")
 	testCases := map[string]struct {
 		shouldOutputResources bool
@@ -117,6 +131,11 @@ func TestEnvDescriber_Describe(t *testing.T) {
 					}, nil),
 					m.deployStoreSvc.EXPECT().ListDeployedServices(testApp, testEnv.Name).
 						Return([]string{"testSvc1", "testSvc2"}, nil),
+					m.configStoreSvc.EXPECT().ListJobs(testApp).Return([]*config.Workload{
+						testJob1, testJob2,
+					}, nil),
+					m.deployStoreSvc.EXPECT().ListDeployedJobs(testApp, testEnv.Name).
+						Return([]string{"testJob1", "testJob2"}, nil),
 					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{}, mockError),
 				)
 			},
@@ -131,6 +150,11 @@ func TestEnvDescriber_Describe(t *testing.T) {
 					}, nil),
 					m.deployStoreSvc.EXPECT().ListDeployedServices(testApp, testEnv.Name).
 						Return([]string{"testSvc1", "testSvc2"}, nil),
+					m.configStoreSvc.EXPECT().ListJobs(testApp).Return([]*config.Workload{
+						testJob1, testJob2,
+					}, nil),
+					m.deployStoreSvc.EXPECT().ListDeployedJobs(testApp, testEnv.Name).
+						Return([]string{"testJob1", "testJob2"}, nil),
 					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
 						Tags:    stackTags,
 						Outputs: stackOutputs,
@@ -149,6 +173,11 @@ func TestEnvDescriber_Describe(t *testing.T) {
 					}, nil),
 					m.deployStoreSvc.EXPECT().ListDeployedServices(testApp, testEnv.Name).
 						Return([]string{"testSvc1", "testSvc2"}, nil),
+					m.configStoreSvc.EXPECT().ListJobs(testApp).Return([]*config.Workload{
+						testJob1, testJob2,
+					}, nil),
+					m.deployStoreSvc.EXPECT().ListDeployedJobs(testApp, testEnv.Name).
+						Return([]string{"testJob1", "testJob2"}, nil),
 					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
 						Tags:    stackTags,
 						Outputs: stackOutputs,
@@ -158,6 +187,7 @@ func TestEnvDescriber_Describe(t *testing.T) {
 			wantedEnv: &EnvDescription{
 				Environment: testEnv,
 				Services:    envSvcs,
+				Jobs:        envJobs,
 				Tags:        map[string]string{"copilot-application": "testApp", "copilot-environment": "testEnv"},
 				EnvironmentVPC: EnvironmentVPC{
 					ID:               "vpc-012abcd345",
@@ -175,6 +205,11 @@ func TestEnvDescriber_Describe(t *testing.T) {
 					}, nil),
 					m.deployStoreSvc.EXPECT().ListDeployedServices(testApp, testEnv.Name).
 						Return([]string{"testSvc1", "testSvc2"}, nil),
+					m.configStoreSvc.EXPECT().ListJobs(testApp).Return([]*config.Workload{
+						testJob1, testJob2,
+					}, nil),
+					m.deployStoreSvc.EXPECT().ListDeployedJobs(testApp, testEnv.Name).
+						Return([]string{"testJob1", "testJob2"}, nil),
 					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
 						Tags:    stackTags,
 						Outputs: stackOutputs,
@@ -188,6 +223,7 @@ func TestEnvDescriber_Describe(t *testing.T) {
 			wantedEnv: &EnvDescription{
 				Environment: testEnv,
 				Services:    envSvcs,
+				Jobs:        envJobs,
 				Tags:        map[string]string{"copilot-application": "testApp", "copilot-environment": "testEnv"},
 				Resources:   wantedResources,
 				EnvironmentVPC: EnvironmentVPC{
@@ -234,6 +270,77 @@ func TestEnvDescriber_Describe(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, tc.wantedEnv, actual)
+			}
+		})
+	}
+}
+
+func TestEnvDescriber_Manifest(t *testing.T) {
+	testCases := map[string]struct {
+		given func(ctrl *gomock.Controller) *EnvDescriber
+
+		wantedManifest []byte
+		wantedErr      error
+	}{
+		"should return an error when the template Metadata cannot be retrieved": {
+			given: func(ctrl *gomock.Controller) *EnvDescriber {
+				m := mocks.NewMockstackDescriber(ctrl)
+				m.EXPECT().StackMetadata().Return("", errors.New("some error"))
+				return &EnvDescriber{
+					cfn: m,
+				}
+			},
+			wantedErr: errors.New("some error"),
+		},
+		"should unmarshal from SSM when the stack template does not have any Metadata.Manifest": {
+			given: func(ctrl *gomock.Controller) *EnvDescriber {
+				m := mocks.NewMockstackDescriber(ctrl)
+				m.EXPECT().StackMetadata().Return(`
+Metadata:
+  Version: 1.9.0
+`, nil)
+				return &EnvDescriber{
+					env: &config.Environment{
+						Name: "test",
+					},
+					cfn: m,
+				}
+			},
+			wantedManifest: []byte(`name: test
+type: Environment`),
+		},
+		"should prioritize stack template's Metadata over SSM": {
+			given: func(ctrl *gomock.Controller) *EnvDescriber {
+				m := mocks.NewMockstackDescriber(ctrl)
+				m.EXPECT().StackMetadata().Return(`{"Version":"1.9.0","Manifest":"\nname: prod\ntype: Environment"}`, nil)
+				return &EnvDescriber{
+					env: &config.Environment{
+						Name: "test",
+					},
+					cfn: m,
+				}
+			},
+			wantedManifest: []byte(`name: prod
+type: Environment`),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// GIVEN
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			describer := tc.given(ctrl)
+
+			// WHEN
+			mft, err := describer.Manifest()
+
+			// THEN
+			if tc.wantedErr != nil {
+				require.EqualError(t, err, tc.wantedErr.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, string(tc.wantedManifest), string(mft), "expected manifests to match")
 			}
 		})
 	}
@@ -365,6 +472,173 @@ func TestEnvDescriber_ServiceDiscoveryEndpoint(t *testing.T) {
 	}
 }
 
+func TestEnvDescriber_PublicCIDRBlocks(t *testing.T) {
+	testCases := map[string]struct {
+		setupMocks func(mocks envDescriberMocks)
+
+		wantedCIDRBlocks []string
+		wantedErr        error
+	}{
+		"fail to describe the environment to get the VPC ID": {
+			setupMocks: func(m envDescriberMocks) {
+				gomock.InOrder(
+					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{}, errors.New("some error")),
+				)
+			},
+			wantedErr: errors.New("retrieve environment stack: some error"),
+		},
+		"fail to get the subnets of the environment VPC": {
+			setupMocks: func(m envDescriberMocks) {
+				gomock.InOrder(
+					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
+						Outputs: map[string]string{
+							"VpcId": "mockVPCID",
+						},
+					}, nil),
+					m.subnetLister.EXPECT().ListVPCSubnets("mockVPCID").Return(nil, errors.New("some error")),
+				)
+			},
+			wantedErr: errors.New("list subnets of vpc mockVPCID in environment mockEnv: some error"),
+		},
+		"return the correct CIDR blocks": {
+			setupMocks: func(m envDescriberMocks) {
+				gomock.InOrder(
+					m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
+						Outputs: map[string]string{
+							"VpcId": "mockVPCID",
+						},
+					}, nil),
+					m.subnetLister.EXPECT().ListVPCSubnets("mockVPCID").Return(&ec2.VPCSubnets{
+						Public: []ec2.Subnet{
+							{
+								CIDRBlock: "mockCIDRBlock1",
+							},
+							{
+								CIDRBlock: "mockCIDRBlock2",
+							},
+						},
+					}, nil),
+				)
+			},
+			wantedCIDRBlocks: []string{"mockCIDRBlock1", "mockCIDRBlock2"},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// GIVEN
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			m := envDescriberMocks{
+				configStoreSvc: mocks.NewMockConfigStoreSvc(ctrl),
+				deployStoreSvc: mocks.NewMockDeployedEnvServicesLister(ctrl),
+				stackDescriber: mocks.NewMockstackDescriber(ctrl),
+				subnetLister:   mocks.NewMockvpcSubnetLister(ctrl),
+			}
+
+			tc.setupMocks(m)
+			d := &EnvDescriber{
+				env: &config.Environment{
+					Name: "mockEnv",
+				},
+
+				configStore:  m.configStoreSvc,
+				deployStore:  m.deployStoreSvc,
+				cfn:          m.stackDescriber,
+				subnetLister: m.subnetLister,
+			}
+
+			// WHEN
+			actual, err := d.PublicCIDRBlocks()
+
+			// THEN
+			if tc.wantedErr != nil {
+				require.EqualError(t, err, tc.wantedErr.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.wantedCIDRBlocks, actual)
+			}
+		})
+	}
+}
+
+func TestEnvDescriber_Features(t *testing.T) {
+	testCases := map[string]struct {
+		setupMock func(m *envDescriberMocks)
+
+		wanted    []string
+		wantedErr error
+	}{
+		"error describing stack": {
+			setupMock: func(m *envDescriberMocks) {
+				m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{}, errors.New("some error"))
+			},
+			wantedErr: errors.New("some error"),
+		},
+		"return outdated features": {
+			setupMock: func(m *envDescriberMocks) {
+				m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
+					Parameters: map[string]string{
+						"AppName":                  "mock-app",
+						"EnvironmentName":          "mock-env",
+						"ToolsAccountPrincipalARN": "mock-arn",
+						"AppDNSName":               "mock-dns",
+						"AppDNSDelegationRole":     "mock-role",
+						"Aliases":                  "",
+						template.ALBFeatureName:    "workload1,workload2",
+						template.EFSFeatureName:    "",
+						template.NATFeatureName:    "",
+					},
+				}, nil)
+			},
+			wanted: []string{template.ALBFeatureName, template.EFSFeatureName, template.NATFeatureName},
+		},
+		"return up-to-date features": {
+			setupMock: func(m *envDescriberMocks) {
+				mockParams := map[string]string{
+					"AppName":                  "mock-app",
+					"EnvironmentName":          "mock-env",
+					"ToolsAccountPrincipalARN": "mock-arn",
+					"AppDNSName":               "mock-dns",
+					"AppDNSDelegationRole":     "mock-role",
+					"Aliases":                  "",
+				}
+				for _, f := range template.AvailableEnvFeatures() {
+					mockParams[f] = ""
+				}
+				m.stackDescriber.EXPECT().Describe().Return(stack.StackDescription{
+					Parameters: mockParams,
+				}, nil)
+			},
+			wanted: template.AvailableEnvFeatures(),
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// GIVEN
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+			m := &envDescriberMocks{
+				stackDescriber: mocks.NewMockstackDescriber(ctrl),
+			}
+			tc.setupMock(m)
+			d := &EnvDescriber{
+				cfn: m.stackDescriber,
+			}
+
+			// WHEN
+			got, err := d.AvailableFeatures()
+
+			// THEN
+			if tc.wantedErr != nil {
+				require.EqualError(t, err, tc.wantedErr.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, tc.wanted, got, "expected features to match")
+			}
+		})
+	}
+}
+
 func TestEnvDescription_JSONString(t *testing.T) {
 	testApp := &config.Application{
 		Name: "testApp",
@@ -396,8 +670,14 @@ func TestEnvDescription_JSONString(t *testing.T) {
 		Name: "testSvc3",
 		Type: "load-balanced",
 	}
+	testJob1 := &config.Workload{
+		App:  "testApp",
+		Name: "testJob1",
+		Type: "Scheduled Job",
+	}
 	allSvcs := []*config.Workload{testSvc1, testSvc2, testSvc3}
-	wantedContent := "{\"environment\":{\"app\":\"testApp\",\"name\":\"testEnv\",\"region\":\"us-west-2\",\"accountID\":\"123456789012\",\"prod\":false,\"registryURL\":\"\",\"executionRoleARN\":\"\",\"managerRoleARN\":\"\",\"customConfig\":{}},\"services\":[{\"app\":\"testApp\",\"name\":\"testSvc1\",\"type\":\"load-balanced\"},{\"app\":\"testApp\",\"name\":\"testSvc2\",\"type\":\"load-balanced\"},{\"app\":\"testApp\",\"name\":\"testSvc3\",\"type\":\"load-balanced\"}],\"tags\":{\"key1\":\"value1\",\"key2\":\"value2\"},\"resources\":[{\"type\":\"AWS::IAM::Role\",\"physicalID\":\"testApp-testEnv-CFNExecutionRole\"},{\"type\":\"testApp-testEnv-Cluster\",\"physicalID\":\"AWS::ECS::Cluster-jI63pYBWU6BZ\"}],\"environmentVPC\":{\"id\":\"\",\"publicSubnetIDs\":null,\"privateSubnetIDs\":null}}\n"
+	allJobs := []*config.Workload{testJob1}
+	wantedContent := "{\"environment\":{\"app\":\"testApp\",\"name\":\"testEnv\",\"region\":\"us-west-2\",\"accountID\":\"123456789012\",\"prod\":false,\"registryURL\":\"\",\"executionRoleARN\":\"\",\"managerRoleARN\":\"\",\"customConfig\":{}},\"services\":[{\"app\":\"testApp\",\"name\":\"testSvc1\",\"type\":\"load-balanced\"},{\"app\":\"testApp\",\"name\":\"testSvc2\",\"type\":\"load-balanced\"},{\"app\":\"testApp\",\"name\":\"testSvc3\",\"type\":\"load-balanced\"}],\"jobs\":[{\"app\":\"testApp\",\"name\":\"testJob1\",\"type\":\"Scheduled Job\"}],\"tags\":{\"key1\":\"value1\",\"key2\":\"value2\"},\"resources\":[{\"type\":\"AWS::IAM::Role\",\"physicalID\":\"testApp-testEnv-CFNExecutionRole\"},{\"type\":\"testApp-testEnv-Cluster\",\"physicalID\":\"AWS::ECS::Cluster-jI63pYBWU6BZ\"}],\"environmentVPC\":{\"id\":\"\",\"publicSubnetIDs\":null,\"privateSubnetIDs\":null}}\n"
 
 	// GIVEN
 	ctrl := gomock.NewController(t)
@@ -407,6 +687,7 @@ func TestEnvDescription_JSONString(t *testing.T) {
 		Environment:    testEnv,
 		EnvironmentVPC: EnvironmentVPC{},
 		Services:       allSvcs,
+		Jobs:           allJobs,
 		Tags:           testApp.Tags,
 		Resources:      wantedResources,
 	}
@@ -448,29 +729,36 @@ func TestEnvDescription_HumanString(t *testing.T) {
 		Name: "testSvc3",
 		Type: "load-balanced",
 	}
+	testJob1 := &config.Workload{
+		App:  "testApp",
+		Name: "testJob1",
+		Type: "Scheduled Job",
+	}
 	allSvcs := []*config.Workload{testSvc1, testSvc2, testSvc3}
+	allJobs := []*config.Workload{testJob1}
 
 	wantedContent := `About
 
-  Name              testEnv
-  Production        false
-  Region            us-west-2
-  Account ID        123456789012
+  Name        testEnv
+  Production  false
+  Region      us-west-2
+  Account ID  123456789012
 
-Services
+Workloads
 
-  Name              Type
-  ----              ----
-  testSvc1          load-balanced
-  testSvc2          load-balanced
-  testSvc3          load-balanced
+  Name      Type
+  ----      ----
+  testSvc1  load-balanced
+  testSvc2  load-balanced
+  testSvc3  load-balanced
+  testJob1  Scheduled Job
 
 Tags
 
-  Key               Value
-  ---               -----
-  key1              value1
-  key2              value2
+  Key     Value
+  ---     -----
+  key1    value1
+  key2    value2
 
 Resources
 
@@ -484,6 +772,7 @@ Resources
 	d := &EnvDescription{
 		Environment: testEnv,
 		Services:    allSvcs,
+		Jobs:        allJobs,
 		Tags:        testApp.Tags,
 		Resources:   wantedResources,
 	}

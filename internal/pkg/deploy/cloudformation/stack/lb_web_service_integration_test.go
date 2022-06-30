@@ -1,4 +1,4 @@
-// +build integration localintegration
+//go:build integration || localintegration
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
@@ -8,15 +8,14 @@ package stack_test
 import (
 	"fmt"
 	"io/ioutil"
+	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"testing"
 
-	"gopkg.in/yaml.v3"
-
+	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
-	"github.com/aws/copilot-cli/internal/pkg/template"
+	"gopkg.in/yaml.v3"
 
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 
@@ -52,54 +51,58 @@ func TestLoadBalancedWebService_Template(t *testing.T) {
 			svcParamsPath: "svc-prod.params.json",
 		},
 	}
+	val, exist := os.LookupEnv("TAG")
+	require.NoError(t, os.Setenv("TAG", "cicdtest"))
+	defer func() {
+		if !exist {
+			require.NoError(t, os.Unsetenv("TAG"))
+			return
+		}
+		require.NoError(t, os.Setenv("TAG", val))
+	}()
 	path := filepath.Join("testdata", "workloads", svcManifestPath)
 	manifestBytes, err := ioutil.ReadFile(path)
 	require.NoError(t, err)
 	for name, tc := range testCases {
-		mft, err := manifest.UnmarshalWorkload(manifestBytes)
+		interpolated, err := manifest.NewInterpolator(appName, tc.envName).Interpolate(string(manifestBytes))
 		require.NoError(t, err)
-
+		mft, err := manifest.UnmarshalWorkload([]byte(interpolated))
+		require.NoError(t, err)
 		envMft, err := mft.ApplyEnv(tc.envName)
 		require.NoError(t, err)
 
-		err = mft.Validate()
+		err = envMft.Validate()
 		require.NoError(t, err)
 
 		v, ok := envMft.(*manifest.LoadBalancedWebService)
 		require.True(t, ok)
 
 		svcDiscoveryEndpointName := fmt.Sprintf("%s.%s.local", tc.envName, appName)
-		serializer, err := stack.NewHTTPSLoadBalancedWebService(v, tc.envName, appName, stack.RuntimeConfig{
-			ServiceDiscoveryEndpoint: svcDiscoveryEndpointName,
-			AccountID:                "123456789123",
-			Region:                   "us-west-2",
+		envConfig := &manifest.Environment{
+			Workload: manifest.Workload{
+				Name: &tc.envName,
+			},
+		}
+		envConfig.HTTPConfig.Public.Certificates = []string{"mockCertARN"}
+		serializer, err := stack.NewLoadBalancedWebService(stack.LoadBalancedWebServiceConfig{
+			App:         &config.Application{Name: appName},
+			EnvManifest: envConfig,
+			Manifest:    v,
+			RuntimeConfig: stack.RuntimeConfig{
+				ServiceDiscoveryEndpoint: svcDiscoveryEndpointName,
+				AccountID:                "123456789123",
+				Region:                   "us-west-2",
+			},
 		})
-
 		tpl, err := serializer.Template()
 		require.NoError(t, err, "template should render")
 		regExpGUID := regexp.MustCompile(`([a-f\d]{8}-)([a-f\d]{4}-){3}([a-f\d]{12})`) // Matches random guids
 		testName := fmt.Sprintf("CF Template should be equal/%s", name)
-		parser := template.New()
-		envController, err := parser.Read(envControllerPath)
-		require.NoError(t, err)
-		envControllerZipFile := envController.String()
-		dynamicDesiredCount, err := parser.Read(dynamicDesiredCountPath)
-		require.NoError(t, err)
-		dynamicDesiredCountZipFile := dynamicDesiredCount.String()
-		rulePriority, err := parser.Read(rulePriorityPath)
-		require.NoError(t, err)
-		rulePriorityZipFile := rulePriority.String()
 
 		t.Run(testName, func(t *testing.T) {
 			actualBytes := []byte(tpl)
 			// Cut random GUID from template.
 			actualBytes = regExpGUID.ReplaceAll(actualBytes, []byte("RandomGUID"))
-			actualString := string(actualBytes)
-			// Cut out zip file for more readable output
-			actualString = strings.ReplaceAll(actualString, envControllerZipFile, "mockEnvControllerZipFile")
-			actualString = strings.ReplaceAll(actualString, dynamicDesiredCountZipFile, "mockDynamicDesiredCountZipFile")
-			actualString = strings.ReplaceAll(actualString, rulePriorityZipFile, "mockRulePriorityZipFile")
-			actualBytes = []byte(actualString)
 			mActual := make(map[interface{}]interface{})
 			require.NoError(t, yaml.Unmarshal(actualBytes, mActual))
 

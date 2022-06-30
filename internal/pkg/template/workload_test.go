@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
-	"gopkg.in/yaml.v3"
 )
 
 func TestTemplate_ParseSvc(t *testing.T) {
@@ -30,7 +29,8 @@ func TestTemplate_ParseSvc(t *testing.T) {
 				return map[string][]byte{
 					"templates/workloads/services/backend/cf.yml":                         []byte(baseContent),
 					"templates/workloads/partials/cf/loggroup.yml":                        []byte("loggroup"),
-					"templates/workloads/partials/cf/envvars.yml":                         []byte("envvars"),
+					"templates/workloads/partials/cf/envvars-container.yml":               []byte("envvars-container"),
+					"templates/workloads/partials/cf/envvars-common.yml":                  []byte("envvars-common"),
 					"templates/workloads/partials/cf/secrets.yml":                         []byte("secrets"),
 					"templates/workloads/partials/cf/executionrole.yml":                   []byte("executionrole"),
 					"templates/workloads/partials/cf/taskrole.yml":                        []byte("taskrole"),
@@ -46,6 +46,8 @@ func TestTemplate_ParseSvc(t *testing.T) {
 					"templates/workloads/partials/cf/eventrule.yml":                       []byte("eventrule"),
 					"templates/workloads/partials/cf/state-machine.yml":                   []byte("state-machine"),
 					"templates/workloads/partials/cf/efs-access-point.yml":                []byte("efs-access-point"),
+					"templates/workloads/partials/cf/https-listener.yml":                  []byte("https-listener"),
+					"templates/workloads/partials/cf/http-listener.yml":                   []byte("http-listener"),
 					"templates/workloads/partials/cf/env-controller.yml":                  []byte("env-controller"),
 					"templates/workloads/partials/cf/mount-points.yml":                    []byte("mount-points"),
 					"templates/workloads/partials/cf/volumes.yml":                         []byte("volumes"),
@@ -54,10 +56,14 @@ func TestTemplate_ParseSvc(t *testing.T) {
 					"templates/workloads/partials/cf/accessrole.yml":                      []byte("accessrole"),
 					"templates/workloads/partials/cf/publish.yml":                         []byte("publish"),
 					"templates/workloads/partials/cf/subscribe.yml":                       []byte("subscribe"),
+					"templates/workloads/partials/cf/nlb.yml":                             []byte("nlb"),
+					"templates/workloads/partials/cf/vpc-connector.yml":                   []byte("vpc-connector"),
+					"templates/workloads/partials/cf/alb.yml":                             []byte("alb"),
 				}
 			},
 			wantedContent: `  loggroup
-  envvars
+  envvars-container
+  envvars-common
   secrets
   executionrole
   taskrole
@@ -73,6 +79,8 @@ func TestTemplate_ParseSvc(t *testing.T) {
   state-machine
   state-machine-definition
   efs-access-point
+  https-listener
+  http-listener
   env-controller
   mount-points
   volumes
@@ -81,6 +89,9 @@ func TestTemplate_ParseSvc(t *testing.T) {
   accessrole
   publish
   subscribe
+  nlb
+  vpc-connector
+  alb
 `,
 		},
 	}
@@ -116,14 +127,14 @@ func TestHasSecrets(t *testing.T) {
 		},
 		"no secrets": {
 			in: WorkloadOpts{
-				Secrets: map[string]string{},
+				Secrets: map[string]Secret{},
 			},
 			wanted: false,
 		},
 		"service has secrets": {
 			in: WorkloadOpts{
-				Secrets: map[string]string{
-					"hello": "world",
+				Secrets: map[string]Secret{
+					"hello": SecretFromSSMOrARN("world"),
 				},
 			},
 			wanted: true,
@@ -145,94 +156,83 @@ func TestHasSecrets(t *testing.T) {
 	}
 }
 
-func TestTemplate_ParseNetwork(t *testing.T) {
-	type cfn struct {
-		Resources struct {
-			Service struct {
-				Properties struct {
-					NetworkConfiguration map[interface{}]interface{} `yaml:"NetworkConfiguration"`
-				} `yaml:"Properties"`
-			} `yaml:"Service"`
-		} `yaml:"Resources"`
-	}
-
+func TestRuntimePlatformOpts_Version(t *testing.T) {
 	testCases := map[string]struct {
-		input *NetworkOpts
-
-		wantedNetworkConfig string
+		in       RuntimePlatformOpts
+		wantedPV string
 	}{
-		"should render AWS VPC configuration for public subnets by default": {
-			input: nil,
-			wantedNetworkConfig: `
- AwsvpcConfiguration:
-   AssignPublicIp: ENABLED
-   Subnets:
-     Fn::Split:
-       - ','
-       - Fn::ImportValue: !Sub '${AppName}-${EnvName}-PublicSubnets'
-   SecurityGroups:
-     - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
-`,
+		"should return LATEST for on empty platform": {
+			wantedPV: "LATEST",
 		},
-		"should render AWS VPC configuration for private subnets": {
-			input: &NetworkOpts{
-				AssignPublicIP: "DISABLED",
-				SubnetsType:    "PrivateSubnets",
+		"should return LATEST for linux containers": {
+			in: RuntimePlatformOpts{
+				OS:   "LINUX",
+				Arch: "X86_64",
 			},
-			wantedNetworkConfig: `
- AwsvpcConfiguration:
-   AssignPublicIp: DISABLED
-   Subnets:
-     Fn::Split:
-       - ','
-       - Fn::ImportValue: !Sub '${AppName}-${EnvName}-PrivateSubnets'
-   SecurityGroups:
-     - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
-`,
+			wantedPV: "LATEST",
 		},
-		"should render AWS VPC configuration for private subnets with security groups": {
-			input: &NetworkOpts{
-				AssignPublicIP: "DISABLED",
-				SubnetsType:    "PrivateSubnets",
-				SecurityGroups: []string{
-					"sg-1bcf1d5b",
-					"sg-asdasdas",
-				},
+		"should return 1.0.0 for windows containers": {
+			in: RuntimePlatformOpts{
+				OS:   "WINDOWS_SERVER_2019_FULL",
+				Arch: "X86_64",
 			},
-			wantedNetworkConfig: `
- AwsvpcConfiguration:
-   AssignPublicIp: DISABLED
-   Subnets:
-     Fn::Split:
-       - ','
-       - Fn::ImportValue: !Sub '${AppName}-${EnvName}-PrivateSubnets'
-   SecurityGroups:
-     - Fn::ImportValue: !Sub '${AppName}-${EnvName}-EnvironmentSecurityGroup'
-     - "sg-1bcf1d5b"
-     - "sg-asdasdas"
-`,
+			wantedPV: "1.0.0",
 		},
 	}
 
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			// GIVEN
-			tpl := New()
-			wanted := make(map[interface{}]interface{})
-			err := yaml.Unmarshal([]byte(tc.wantedNetworkConfig), &wanted)
-			require.NoError(t, err, "unmarshal wanted config")
-
-			// WHEN
-			content, err := tpl.ParseLoadBalancedWebService(WorkloadOpts{
-				Network: tc.input,
-			})
-
-			// THEN
-			require.NoError(t, err, "parse load balanced web service")
-			var actual cfn
-			err = yaml.Unmarshal(content.Bytes(), &actual)
-			require.NoError(t, err, "unmarshal actual config")
-			require.Equal(t, wanted, actual.Resources.Service.Properties.NetworkConfiguration)
+			require.Equal(t, tc.wantedPV, tc.in.Version())
 		})
 	}
+}
+
+func TestRuntimePlatformOpts_IsDefault(t *testing.T) {
+	testCases := map[string]struct {
+		in     RuntimePlatformOpts
+		wanted bool
+	}{
+		"should return true on empty platform": {
+			wanted: true,
+		},
+		"should return true for linux/x86_64": {
+			in: RuntimePlatformOpts{
+				OS:   "LINUX",
+				Arch: "X86_64",
+			},
+			wanted: true,
+		},
+		"should return false for windows containers": {
+			in: RuntimePlatformOpts{
+				OS:   "WINDOWS_SERVER_2019_CORE",
+				Arch: "X86_64",
+			},
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			require.Equal(t, tc.wanted, tc.in.IsDefault())
+		})
+	}
+}
+
+func TestSsmOrSecretARN_RequiresSub(t *testing.T) {
+	require.False(t, ssmOrSecretARN{}.RequiresSub(), "SSM Parameter Store or secret ARNs do not require !Sub")
+}
+
+func TestSsmOrSecretARN_ValueFrom(t *testing.T) {
+	require.Equal(t, "/github/token", SecretFromSSMOrARN("/github/token").ValueFrom())
+}
+
+func TestSecretsManagerName_RequiresSub(t *testing.T) {
+	require.True(t, secretsManagerName{}.RequiresSub(), "secrets referring to a SecretsManager name need to be expanded to a full ARN")
+}
+
+func TestSecretsManagerName_Service(t *testing.T) {
+	require.Equal(t, "secretsmanager", secretsManagerName{}.Service())
+}
+
+func TestSecretsManagerName_ValueFrom(t *testing.T) {
+	require.Equal(t, "secret:aes128-1a2b3c", SecretFromSecretsManager("aes128-1a2b3c").ValueFrom())
 }

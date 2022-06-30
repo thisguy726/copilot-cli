@@ -25,14 +25,57 @@ type RequestDrivenWebService struct {
 // RequestDrivenWebServiceConfig holds the configuration that can be overridden per environments.
 type RequestDrivenWebServiceConfig struct {
 	RequestDrivenWebServiceHttpConfig `yaml:"http,flow"`
-	InstanceConfig                    AppRunnerInstanceConfig `yaml:",inline"`
-	ImageConfig                       ImageWithPort           `yaml:"image"`
-	Variables                         map[string]string       `yaml:"variables"`
-	StartCommand                      *string                 `yaml:"command"`
-	Tags                              map[string]string       `yaml:"tags"`
-	PublishConfig                     PublishConfig           `yaml:"publish"`
+	InstanceConfig                    AppRunnerInstanceConfig              `yaml:",inline"`
+	ImageConfig                       ImageWithPort                        `yaml:"image"`
+	Variables                         map[string]string                    `yaml:"variables"`
+	StartCommand                      *string                              `yaml:"command"`
+	Tags                              map[string]string                    `yaml:"tags"`
+	PublishConfig                     PublishConfig                        `yaml:"publish"`
+	Network                           RequestDrivenWebServiceNetworkConfig `yaml:"network"`
+	Observability                     Observability                        `yaml:"observability"`
 }
 
+// Observability holds configuration for observability to the service.
+type Observability struct {
+	Tracing *string `yaml:"tracing"`
+}
+
+func (o *Observability) isEmpty() bool {
+	return o.Tracing == nil
+}
+
+// ImageWithPort represents a container image with an exposed port.
+type ImageWithPort struct {
+	Image Image   `yaml:",inline"`
+	Port  *uint16 `yaml:"port"`
+}
+
+// RequestDrivenWebServiceNetworkConfig represents options for network connection to AWS resources for a Request-Driven Web Service.
+type RequestDrivenWebServiceNetworkConfig struct {
+	VPC rdwsVpcConfig `yaml:"vpc"`
+}
+
+// IsEmpty returns empty if the struct has all zero members.
+func (c *RequestDrivenWebServiceNetworkConfig) IsEmpty() bool {
+	return c.VPC.isEmpty()
+}
+
+func (c *RequestDrivenWebServiceNetworkConfig) requiredEnvFeatures() []string {
+	if aws.StringValue((*string)(c.VPC.Placement.PlacementString)) == string(PrivateSubnetPlacement) {
+		return []string{template.NATFeatureName}
+	}
+	return nil
+}
+
+type rdwsVpcConfig struct {
+	Placement PlacementArgOrString `yaml:"placement"`
+}
+
+func (c *rdwsVpcConfig) isEmpty() bool {
+	return c.Placement.IsEmpty()
+}
+
+// RequestDrivenWebServiceHttpConfig represents options for configuring http.
 type RequestDrivenWebServiceHttpConfig struct {
 	HealthCheckConfiguration HealthCheckArgsOrString `yaml:"healthcheck"`
 	Alias                    *string                 `yaml:"alias"`
@@ -90,13 +133,12 @@ func (s *RequestDrivenWebService) BuildRequired() (bool, error) {
 	return requiresBuild(s.ImageConfig.Image)
 }
 
-// TaskPlatform returns the platform for the service.
-func (s *RequestDrivenWebService) TaskPlatform() (*string, error) {
-	if s.InstanceConfig.Platform.PlatformString == nil {
-		return nil, nil
+// ContainerPlatform returns the platform for the service.
+func (s *RequestDrivenWebService) ContainerPlatform() string {
+	if s.InstanceConfig.Platform.IsEmpty() {
+		return platformString(OSLinux, ArchAMD64)
 	}
-	str := string(*s.InstanceConfig.Platform.PlatformString)
-	return &str, nil
+	return platformString(s.InstanceConfig.Platform.OS(), s.InstanceConfig.Platform.Arch())
 }
 
 // BuildArgs returns a docker.BuildArguments object given a ws root directory.
@@ -123,6 +165,13 @@ func (s RequestDrivenWebService) ApplyEnv(envName string) (WorkloadManifest, err
 
 	s.Environments = nil
 	return &s, nil
+}
+
+// RequiredEnvironmentFeatures returns environment features that are required for this manifest.
+func (s *RequestDrivenWebService) RequiredEnvironmentFeatures() []string {
+	var features []string
+	features = append(features, s.Network.requiredEnvFeatures()...)
+	return features
 }
 
 // newDefaultRequestDrivenWebService returns an empty RequestDrivenWebService with only the default values set.

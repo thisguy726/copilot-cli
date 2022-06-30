@@ -1,3 +1,4 @@
+//go:build integration || localintegration
 // +build integration localintegration
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -19,11 +20,20 @@ import (
 )
 
 func TestRDWS_Template(t *testing.T) {
-	const (
-		envName               = "test"
-		manifestFileName      = "rdws-manifest.yml"
-		stackTemplateFileName = "rdws.stack.yml"
-	)
+	const manifestFileName = "rdws-manifest.yml"
+	testCases := map[string]struct {
+		envName      string
+		svcStackPath string
+	}{
+		"test env": {
+			envName:      "test",
+			svcStackPath: "rdws-test.stack.yml",
+		},
+		"prod env": {
+			envName:      "prod",
+			svcStackPath: "rdws-prod.stack.yml",
+		},
+	}
 
 	// Read manifest.
 	manifestBytes, err := ioutil.ReadFile(filepath.Join("testdata", "workloads", manifestFileName))
@@ -31,38 +41,38 @@ func TestRDWS_Template(t *testing.T) {
 
 	mft, err := manifest.UnmarshalWorkload(manifestBytes)
 	require.NoError(t, err, "unmarshal manifest file")
+	for _, tc := range testCases {
+		envMft, err := mft.ApplyEnv(tc.envName)
+		require.NoError(t, err, "apply test env to manifest")
 
-	envMft, err := mft.ApplyEnv(envName)
-	require.NoError(t, err, "apply test env to manifest")
+		err = envMft.Validate()
+		require.NoError(t, err)
 
-	err = mft.Validate()
-	require.NoError(t, err)
+		v, ok := envMft.(*manifest.RequestDrivenWebService)
+		require.True(t, ok)
 
-	v, ok := envMft.(*manifest.RequestDrivenWebService)
-	require.True(t, ok)
+		// Read wanted stack template.
+		wantedTemplate, err := ioutil.ReadFile(filepath.Join("testdata", "workloads", tc.svcStackPath))
+		require.NoError(t, err, "read cloudformation stack")
 
-	// Read wanted stack template.
-	wantedTemplate, err := ioutil.ReadFile(filepath.Join("testdata", "workloads", stackTemplateFileName))
-	require.NoError(t, err, "read cloudformation stack")
+		// Read actual stack template.
+		serializer, err := stack.NewRequestDrivenWebService(v, tc.envName, deploy.AppInformation{
+			Name: appName,
+		}, stack.RuntimeConfig{
+			AccountID: "123456789123",
+			Region:    "us-west-2",
+		})
+		require.NoError(t, err, "create rdws serializer")
+		actualTemplate, err := serializer.Template()
+		require.NoError(t, err, "get cloudformation template for rdws")
 
-	// Read actual stack template.
-	serializer, err := stack.NewRequestDrivenWebService(v, envName, deploy.AppInformation{
-		Name: appName,
-	}, stack.RuntimeConfig{
-		AccountID: "123456789123",
-		Region:    "us-west-2",
-	})
-	require.NoError(t, err, "create rdws serializer")
-	actualTemplate, err := serializer.Template()
-	require.NoError(t, err, "get cloudformation template for rdws")
+		// Compare the two.
+		wanted := make(map[interface{}]interface{})
+		require.NoError(t, yaml.Unmarshal(wantedTemplate, wanted), "unmarshal wanted template to map[interface{}]interface{}")
 
-	// Compare the two.
-	wanted := make(map[interface{}]interface{})
-	require.NoError(t, yaml.Unmarshal(wantedTemplate, wanted), "unmarshal wanted template to map[interface{}]interface{}")
+		actual := make(map[interface{}]interface{})
+		require.NoError(t, yaml.Unmarshal([]byte(actualTemplate), actual), "unmarshal actual template to map[interface{}]interface{}")
 
-	actual := make(map[interface{}]interface{})
-	require.NoError(t, yaml.Unmarshal([]byte(actualTemplate), actual), "unmarshal actual template to map[interface{}]interface{}")
-
-	require.Equal(t, wanted, actual, "templates do not match")
-
+		require.Equal(t, wanted, actual, "templates do not match")
+	}
 }

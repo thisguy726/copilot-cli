@@ -1,4 +1,6 @@
+//go:build integration
 // +build integration
+
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -12,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/service/cloudformation"
 	"github.com/aws/copilot-cli/internal/pkg/aws/sessions"
+	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 	"github.com/stretchr/testify/require"
@@ -25,17 +28,31 @@ func TestAutoscalingIntegration_Validate(t *testing.T) {
 	require.NoError(t, err)
 	v, ok := mft.(*manifest.LoadBalancedWebService)
 	require.Equal(t, ok, true)
-	serializer, err := stack.NewHTTPSLoadBalancedWebService(v, envName, appName, stack.RuntimeConfig{
-		Image: &stack.ECRImage{
-			RepoURL:  imageURL,
-			ImageTag: imageTag,
+	serializer, err := stack.NewLoadBalancedWebService(stack.LoadBalancedWebServiceConfig{
+		App: &config.Application{Name: appName},
+		EnvManifest: &manifest.Environment{
+			Workload: manifest.Workload{
+				Name: &tc.envName,
+			},
 		},
-		ServiceDiscoveryEndpoint: "test.app.local",
+		Manifest: v,
+		RuntimeConfig: stack.RuntimeConfig{
+			Image: &stack.ECRImage{
+				RepoURL:  imageURL,
+				ImageTag: imageTag,
+			},
+			ServiceDiscoveryEndpoint: "test.app.local",
+			CustomResourcesURL: map[string]string{
+				"EnvControllerFunction":       "https://my-bucket.s3.us-west-2.amazonaws.com/code.zip",
+				"DynamicDesiredCountFunction": "https://my-bucket.s3.us-west-2.amazonaws.com/code.zip",
+				"RulePriorityFunction":        "https://my-bucket.s3.us-west-2.amazonaws.com/code.zip",
+			},
+		},
 	})
 	require.NoError(t, err)
 	tpl, err := serializer.Template()
 	require.NoError(t, err)
-	sess, err := sessions.NewProvider().Default()
+	sess, err := sessions.ImmutableProvider().Default()
 	require.NoError(t, err)
 	cfn := cloudformation.New(sess)
 
@@ -57,12 +74,15 @@ func TestScheduledJob_Validate(t *testing.T) {
 	require.True(t, ok)
 	serializer, err := stack.NewScheduledJob(v, envName, appName, stack.RuntimeConfig{
 		ServiceDiscoveryEndpoint: "test.app.local",
+		CustomResourcesURL: map[string]string{
+			"EnvControllerFunction": "https://my-bucket.s3.us-west-2.amazonaws.com/code.zip",
+		},
 	})
 
 	tpl, err := serializer.Template()
 	require.NoError(t, err, "template should render")
 
-	sess, err := sessions.NewProvider().Default()
+	sess, err := sessions.ImmutableProvider().Default()
 	require.NoError(t, err)
 	cfn := cloudformation.New(sess)
 

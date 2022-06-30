@@ -20,6 +20,10 @@ type actionRecommender interface {
 	RecommendActions() string
 }
 
+type exitCodeError interface {
+	ExitCode() int
+}
+
 func init() {
 	color.DisableColorBasedOnEnvVar()
 	cobra.EnableCommandSorting = false // Maintain the order in which we add commands.
@@ -29,8 +33,14 @@ func main() {
 	cmd := buildRootCmd()
 	if err := cmd.Execute(); err != nil {
 		var ac actionRecommender
+		var exitCodeErr exitCodeError
+
 		if errors.As(err, &ac) {
 			log.Infoln(ac.RecommendActions())
+		}
+		if errors.As(err, &exitCodeErr) {
+			log.Infoln(err.Error())
+			os.Exit(exitCodeErr.ExitCode())
 		}
 		log.Errorln(err.Error())
 		os.Exit(1)
@@ -51,6 +61,9 @@ func buildRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
+
+	cmd.SetOut(log.OutputWriter)
+	cmd.SetErr(log.DiagnosticWriter)
 
 	// Sets version for --version flag. Version command gives more detailed
 	// version information.
@@ -81,7 +94,6 @@ func buildRootCmd() *cobra.Command {
 	cmd.AddCommand(cli.BuildPipelineCmd())
 	cmd.AddCommand(cli.BuildDeployCmd())
 
-	// "Debug" command group.
 	cmd.SetUsageTemplate(template.RootUsage)
 	return cmd
 }

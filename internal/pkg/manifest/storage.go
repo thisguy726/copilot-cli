@@ -7,6 +7,7 @@ import (
 	"errors"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/template"
 	"gopkg.in/yaml.v3"
 )
 
@@ -23,6 +24,23 @@ type Storage struct {
 // IsEmpty returns empty if the struct has all zero members.
 func (s *Storage) IsEmpty() bool {
 	return s.Ephemeral == nil && s.Volumes == nil
+}
+
+func (s *Storage) requiredEnvFeatures() []string {
+	if s.hasManagedFS() {
+		return []string{template.EFSFeatureName}
+	}
+	return nil
+}
+
+func (s *Storage) hasManagedFS() bool {
+	for _, v := range s.Volumes {
+		if v.EmptyVolume() || !v.EFS.UseManagedFS() {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 // Volume is an abstraction which merges the MountPoint and Volumes concepts from the ECS Task Definition
@@ -94,10 +112,14 @@ func (e *EFSConfigOrBool) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	if !e.Advanced.IsEmpty() {
-		// Unmarshaled successfully to e.Config, unset e.ID, and return.
 		if err := e.Advanced.isValid(); err != nil {
+			// NOTE: `e.Advanced` contains exclusive fields.
+			// Validating that exclusive fields cannot be set simultaneously is necessary during `UnmarshalYAML`
+			// because the `ApplyEnv` stage assumes that no exclusive fields are set together.
+			// Not validating it during `UnmarshalYAML` would potentially cause an invalid manifest being deemed valid.
 			return err
 		}
+		// Unmarshaled successfully to e.Config, unset e.ID, and return.
 		e.Enabled = nil
 		return nil
 	}

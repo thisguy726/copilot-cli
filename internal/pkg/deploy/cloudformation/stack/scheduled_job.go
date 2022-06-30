@@ -43,7 +43,7 @@ var (
 	fmtRateScheduleExpression = "rate(%d %s)" // rate({duration} {units})
 	fmtCronScheduleExpression = "cron(%s)"
 
-	awsScheduleRegexp = regexp.MustCompile(`(?:rate|cron)\(.*\)`) // Validates that an expression is of the form rate(xyz) or cron(abc)
+	awsScheduleRegexp = regexp.MustCompile(`((?:rate|cron)\(.*\)|none)`) // Validates that an expression is of the form rate(xyz) or cron(abc) or value 'none'
 )
 
 const (
@@ -119,22 +119,17 @@ func NewScheduledJob(mft *manifest.ScheduledJob, env, app string, rc RuntimeConf
 
 // Template returns the CloudFormation template for the scheduled job.
 func (j *ScheduledJob) Template() (string, error) {
-	outputs, err := j.addonsOutputs()
+	addonsParams, err := j.addonsParameters()
 	if err != nil {
 		return "", err
 	}
-	convSidecarOpts := convertSidecarOpts{
-		sidecarConfig: j.manifest.Sidecars,
-		imageConfig:   &j.manifest.ImageConfig.Image,
-		workloadName:  aws.StringValue(j.manifest.Name),
+	addonsOutputs, err := j.addonsOutputs()
+	if err != nil {
+		return "", err
 	}
-	sidecars, err := convertSidecar(convSidecarOpts)
+	sidecars, err := convertSidecar(j.manifest.Sidecars)
 	if err != nil {
 		return "", fmt.Errorf("convert the sidecar configuration for job %s: %w", j.name, err)
-	}
-	dependencies, err := convertImageDependsOn(convSidecarOpts)
-	if err != nil {
-		return "", fmt.Errorf("convert container dependency for job %s: %w", j.name, err)
 	}
 	publishers, err := convertPublish(j.manifest.Publish(), j.rc.AccountID, j.rc.Region, j.app, j.env, j.name)
 	if err != nil {
@@ -144,22 +139,14 @@ func (j *ScheduledJob) Template() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("convert schedule for job %s: %w", j.name, err)
 	}
-
 	stateMachine, err := j.stateMachineOpts()
 	if err != nil {
 		return "", fmt.Errorf("convert retry/timeout config for job %s: %w", j.name, err)
 	}
-
-	storage, err := convertStorageOpts(j.manifest.Name, j.manifest.Storage)
+	crs, err := convertCustomResources(j.rc.CustomResourcesURL)
 	if err != nil {
-		return "", fmt.Errorf("convert storage options for job %s: %w", j.name, err)
+		return "", err
 	}
-
-	envControllerLambda, err := j.parser.Read(envControllerPath)
-	if err != nil {
-		return "", fmt.Errorf("read env controller lambda: %w", err)
-	}
-
 	entrypoint, err := convertEntryPoint(j.manifest.EntryPoint)
 	if err != nil {
 		return "", err
@@ -171,24 +158,27 @@ func (j *ScheduledJob) Template() (string, error) {
 
 	content, err := j.parser.ParseScheduledJob(template.WorkloadOpts{
 		Variables:                j.manifest.Variables,
-		Secrets:                  j.manifest.Secrets,
-		NestedStack:              outputs,
+		Secrets:                  convertSecrets(j.manifest.Secrets),
+		WorkloadType:             manifest.ScheduledJobType,
+		NestedStack:              addonsOutputs,
+		AddonsExtraParams:        addonsParams,
 		Sidecars:                 sidecars,
 		ScheduleExpression:       schedule,
 		StateMachine:             stateMachine,
 		HealthCheck:              convertContainerHealthCheck(j.manifest.ImageConfig.HealthCheck),
 		LogConfig:                convertLogging(j.manifest.Logging),
 		DockerLabels:             j.manifest.ImageConfig.Image.DockerLabels,
-		Storage:                  storage,
+		Storage:                  convertStorageOpts(j.manifest.Name, j.manifest.Storage),
 		Network:                  convertNetworkConfig(j.manifest.Network),
 		EntryPoint:               entrypoint,
 		Command:                  command,
-		DependsOn:                dependencies,
+		DependsOn:                convertDependsOn(j.manifest.ImageConfig.Image.DependsOn),
 		CredentialsParameter:     aws.StringValue(j.manifest.ImageConfig.Image.Credentials),
 		ServiceDiscoveryEndpoint: j.rc.ServiceDiscoveryEndpoint,
 		Publish:                  publishers,
+		Platform:                 convertPlatform(j.manifest.Platform),
 
-		EnvControllerLambda: envControllerLambda.String(),
+		CustomResources: crs,
 	})
 	if err != nil {
 		return "", fmt.Errorf("parse scheduled job template: %w", err)
@@ -214,6 +204,10 @@ func (j *ScheduledJob) Parameters() ([]*cloudformation.Parameter, error) {
 		{
 			ParameterKey:   aws.String(ScheduledJobScheduleParamKey),
 			ParameterValue: aws.String(schedule),
+		},
+		{
+			ParameterKey:   aws.String(WorkloadEnvFileARNParamKey),
+			ParameterValue: aws.String(j.rc.EnvFileARN),
 		},
 	}...), nil
 }
@@ -259,6 +253,8 @@ func (j *ScheduledJob) awsSchedule() (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("parse preset schedule: %w", err)
 		}
+	case schedule == "none":
+		scheduleExpression = schedule // Keep expression as "none" when the job is disabled.
 	default:
 		scheduleExpression, err = toAWSCron(schedule)
 		if err != nil {

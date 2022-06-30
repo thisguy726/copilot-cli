@@ -12,12 +12,13 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/robfig/cron/v3"
 
 	"github.com/spf13/afero"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/copilot-cli/internal/pkg/addon"
 	"github.com/aws/copilot-cli/internal/pkg/aws/apprunner"
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
@@ -29,6 +30,7 @@ var (
 	errValueTooLong         = errors.New("value must not exceed 255 characters")
 	errValueBadFormat       = errors.New("value must start with a letter, contain only lower-case letters, numbers, and hyphens, and have no consecutive or trailing hyphen")
 	errValueNotAString      = errors.New("value must be a string")
+	errValueReserved        = errors.New("value is reserved")
 	errValueNotAStringSlice = errors.New("value must be a string slice")
 	errValueNotAValidPath   = errors.New("value must be a valid path")
 	errValueNotAnIPNet      = errors.New("value must be a valid IP address range (example: 10.0.0.0/16)")
@@ -59,6 +61,7 @@ var (
 
 	// Aurora-Serverless-specific errors.
 	errInvalidRDSNameCharacters    = errors.New("value must start with a letter")
+	errRDWSNotConnectedToVPC       = fmt.Errorf("%s requires a VPC connection", manifest.RequestDrivenWebServiceType)
 	fmtErrInvalidEngineType        = "invalid engine type %s: must be one of %s"
 	fmtErrInvalidDBNameCharacters  = "invalid database name %s: must contain only alphanumeric characters and underscore; should start with a letter"
 	errInvalidSecretNameCharacters = errors.New("value must contain only letters, numbers, periods, hyphens and underscores")
@@ -67,8 +70,6 @@ var (
 	errMissingPublishTopicField = errors.New("field `publish.topics[].name` cannot be empty")
 	errInvalidPubSubTopicName   = errors.New("topic names can only contain letters, numbers, underscores, and hyphens")
 	errSubscribeBadFormat       = errors.New("value must be of the form <serviceName>:<topicName>")
-
-	fmtErrTopicSubscriptionNotAllowed = "SNS topic %s does not exist in environment %s"
 )
 
 const fmtErrValueBadSize = "value must be between %d and %d characters in length"
@@ -77,6 +78,12 @@ const fmtErrValueBadSize = "value must be between %d and %d characters in length
 var (
 	errAppRunnerSvcNameTooLong    = errors.New("value must not exceed 40 characters")
 	errAppRunnerImageNotSupported = errors.New("value must be an ECR or ECR Public image URI")
+)
+
+// Pipelines
+const (
+	maxPipelineStackNameLen   = 128
+	fmtErrPipelineNameTooLong = "value must not exceed %d characters"
 )
 
 var (
@@ -153,9 +160,15 @@ var (
 	regexpMatchSubscription = regexp.MustCompile(`^(\S+):(\S+)`)     // Validates that an expression contains the format serviceName:topicName
 )
 
-var resourceNameFormat = "%s-%s-%s-%s" // Format for copilot resource names of form app-env-svc-name
-
 const regexpFindAllMatches = -1
+
+// reservedWorkloadNames is a constant map of reserved workload names that users are not allowed to name their workloads
+func reservedWorkloadNames() map[string]bool {
+	return map[string]bool{
+		"pipelines":    true, // reserved to avoid directory conflict with copilot pipelines
+		"environments": true, // reserved to avoid directory conflict with copilot environments
+	}
+}
 
 func validateAppName(val interface{}) error {
 	if err := basicNameValidation(val); err != nil {
@@ -175,11 +188,25 @@ func validateSvcName(val interface{}, svcType string) error {
 	if err != nil {
 		return fmt.Errorf("service name %v is invalid: %w", val, err)
 	}
+	if err := validateNotReservedWorkloadName(val); err != nil {
+		return fmt.Errorf("service name %v is invalid: %w", val, err)
+	}
+	return nil
+}
+
+func validateNotReservedWorkloadName(val interface{}) error {
+	name, ok := val.(string)
+	switch {
+	case !ok:
+		return errValueNotAString
+	case reservedWorkloadNames()[name]:
+		return errValueReserved
+	}
+
 	return nil
 }
 
 func validateSvcPort(val interface{}) error {
-
 	if err := basicPortValidation(val); err != nil {
 		return fmt.Errorf("port %v is invalid: %w", val, err)
 	}
@@ -191,7 +218,7 @@ func validateSvcType(val interface{}) error {
 	if !ok {
 		return errValueNotAString
 	}
-	return validateWorkloadType(svcType, manifest.ServiceTypes, service)
+	return validateWorkloadType(svcType, manifest.ServiceTypes(), service)
 }
 
 func validateWorkloadType(wkldType string, validTypes []string, errFlavor string) error {
@@ -209,12 +236,37 @@ func validateJobType(val interface{}) error {
 	if !ok {
 		return errValueNotAString
 	}
-	return validateWorkloadType(jobType, manifest.JobTypes, job)
+	return validateWorkloadType(jobType, manifest.JobTypes(), job)
 }
 
 func validateJobName(val interface{}) error {
 	if err := basicNameValidation(val); err != nil {
 		return fmt.Errorf("job name %v is invalid: %w", val, err)
+	}
+	if err := validateNotReservedWorkloadName(val); err != nil {
+		return fmt.Errorf("service name %v is invalid: %w", val, err)
+	}
+	return nil
+}
+
+func validatePipelineName(val interface{}, appName string) error {
+	// compute the longest name a user can name their pipeline for this app
+	// since we prefix their name with 'pipeline-[app]-'. the limit is required
+	// because it's the name we give the cfn stack for the pipeline.
+	maxNameLen := maxPipelineStackNameLen - len(fmt.Sprintf(fmtPipelineStackName, appName, ""))
+	errFmt := "pipeline name %v is invalid: %w"
+
+	if err := basicNameValidation(val); err != nil {
+		return fmt.Errorf(errFmt, val, err)
+	}
+
+	name, ok := val.(string)
+	switch {
+	case !ok:
+		return fmt.Errorf(errFmt, val, errValueNotAString)
+	case len(name) > maxNameLen:
+		err := fmt.Errorf(fmtErrPipelineNameTooLong, maxNameLen)
+		return fmt.Errorf(errFmt, val, err)
 	}
 	return nil
 }
@@ -280,17 +332,51 @@ func validatePath(fs afero.Fs, val interface{}) error {
 	return nil
 }
 
-func validateStorageType(val interface{}) error {
+type validateStorageTypeOpts struct {
+	ws           manifestReader
+	workloadName string
+}
+
+func validateStorageType(val interface{}, opts validateStorageTypeOpts) error {
 	storageType, ok := val.(string)
 	if !ok {
 		return errValueNotAString
 	}
-	for _, validType := range storageTypes {
-		if storageType == validType {
-			return nil
-		}
+	if !contains(storageType, storageTypes) {
+		return fmt.Errorf(fmtErrInvalidStorageType, storageType, prettify(storageTypes))
 	}
-	return fmt.Errorf(fmtErrInvalidStorageType, storageType, prettify(storageTypes))
+
+	if storageType == rdsStorageType {
+		return validateAuroraStorageType(opts.ws, opts.workloadName)
+	}
+	return nil
+}
+
+func validateAuroraStorageType(ws manifestReader, workloadName string) error {
+	if workloadName == "" {
+		return nil // Workload not yet selected while validating storage type flag.
+	}
+	mft, err := ws.ReadWorkloadManifest(workloadName)
+	if err != nil {
+		return fmt.Errorf("invalid storage type %s: read manifest file for %s: %w", rdsStorageType, workloadName, err)
+	}
+	mftType, err := mft.WorkloadType()
+	if err != nil {
+		return fmt.Errorf("invalid storage type %s: read type of workload from manifest file for %s: %w", rdsStorageType, workloadName, err)
+	}
+	if mftType != manifest.RequestDrivenWebServiceType {
+		return nil
+	}
+	data := struct {
+		Network manifest.RequestDrivenWebServiceNetworkConfig `yaml:"network"`
+	}{}
+	if err := yaml.Unmarshal(mft, &data); err != nil {
+		return fmt.Errorf("invalid storage type %s: unmarshal manifest for %s to read network config: %w", rdsStorageType, workloadName, err)
+	}
+	if data.Network.IsEmpty() {
+		return fmt.Errorf("invalid storage type %s: %w", rdsStorageType, errRDWSNotConnectedToVPC)
+	}
+	return nil
 }
 
 func validateMySQLDBName(val interface{}) error {
@@ -703,25 +789,6 @@ func validatePubSubName(name string) error {
 	return nil
 }
 
-func validateTopicsExist(subscriptions []manifest.TopicSubscription, topicARNs []string, app, env string) error {
-	validTopicResources := make([]string, 0, len(topicARNs))
-	for _, topic := range topicARNs {
-		parsedTopic, err := arn.Parse(topic)
-		if err != nil {
-			continue
-		}
-		validTopicResources = append(validTopicResources, parsedTopic.Resource)
-	}
-
-	for _, ts := range subscriptions {
-		topicName := fmt.Sprintf(resourceNameFormat, app, env, aws.StringValue(ts.Service), aws.StringValue(ts.Name))
-		if !contains(topicName, validTopicResources) {
-			return fmt.Errorf(fmtErrTopicSubscriptionNotAllowed, topicName, env)
-		}
-	}
-	return nil
-}
-
 func prettify(inputStrings []string) string {
 	prettyTypes := template.QuoteSliceFunc(inputStrings)
 	return strings.Join(prettyTypes, ", ")
@@ -737,6 +804,32 @@ func validateCIDR(val interface{}) error {
 		return errValueNotAnIPNet
 	}
 	return nil
+}
+
+func validatePublicSubnetsCIDR(numAZs int) func(v interface{}) error {
+	return func(v interface{}) error {
+		s, ok := v.(string)
+		if !ok {
+			return errValueNotAString
+		}
+		if numCIDRs := len(strings.Split(s, ",")); numCIDRs != numAZs {
+			return fmt.Errorf("number of public subnet CIDRs (%d) does not match number of AZs (%d)", numCIDRs, numAZs)
+		}
+		return validateCIDRSlice(v)
+	}
+}
+
+func validatePrivateSubnetsCIDR(numAZs int) func(v interface{}) error {
+	return func(v interface{}) error {
+		s, ok := v.(string)
+		if !ok {
+			return errValueNotAString
+		}
+		if numCIDRs := len(strings.Split(s, ",")); numCIDRs != numAZs {
+			return fmt.Errorf("number of private subnet CIDRs (%d) does not match number of AZs (%d)", numCIDRs, numAZs)
+		}
+		return validateCIDRSlice(v)
+	}
 }
 
 func validateCIDRSlice(val interface{}) error {

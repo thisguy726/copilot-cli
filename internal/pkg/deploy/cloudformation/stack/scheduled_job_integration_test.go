@@ -1,3 +1,4 @@
+//go:build integration || localintegration
 // +build integration localintegration
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
@@ -8,7 +9,6 @@ package stack_test
 import (
 	"io/ioutil"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -16,8 +16,6 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/deploy/cloudformation/stack"
 
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
-	"github.com/aws/copilot-cli/internal/pkg/template"
-
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,7 +37,7 @@ func TestScheduledJob_Template(t *testing.T) {
 	envMft, err := mft.ApplyEnv(envName)
 	require.NoError(t, err)
 
-	err = mft.Validate()
+	err = envMft.Validate()
 	require.NoError(t, err)
 
 	v, ok := envMft.(*manifest.ScheduledJob)
@@ -51,16 +49,8 @@ func TestScheduledJob_Template(t *testing.T) {
 
 	tpl, err := serializer.Template()
 	require.NoError(t, err, "template should render")
-	parser := template.New()
-	envController, err := parser.Read(envControllerPath)
-	require.NoError(t, err)
-	zipFile := envController.String()
 	t.Run("CF Template should be equal", func(t *testing.T) {
 		actualBytes := []byte(tpl)
-		actualString := string(actualBytes)
-		// Cut out zip file from EnvControllerAction for more readable output
-		actualString = strings.ReplaceAll(actualString, zipFile, "Abracadabra")
-		actualBytes = []byte(actualString)
 		mActual := make(map[interface{}]interface{})
 		require.NoError(t, yaml.Unmarshal(actualBytes, mActual))
 

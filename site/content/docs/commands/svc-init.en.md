@@ -1,5 +1,5 @@
 # svc init
-```bash
+```console
 $ copilot svc init
 ```
 
@@ -13,7 +13,7 @@ After that, if you already have an environment set up, you can run `copilot depl
 
 ## What are the flags?
 
-```bash
+```
 Flags
   -a, --app string          Name of the application.
   -d, --dockerfile string   Path to the Dockerfile.
@@ -23,7 +23,7 @@ Flags
   -n, --name string         Name of the service.
       --port uint16         The port on which your service listens.
   -t, --svc-type string     Type of service to create. Must be one of:
-                            "Request-Driven Web Service", "Load Balanced Web Service", "Backend Service".
+                            "Request-Driven Web Service", "Load Balanced Web Service", "Backend Service", "Worker Service".
 ```
 
 To create a "frontend" load balanced web service you could run:

@@ -86,7 +86,11 @@ package-custom-resources-clean:
 
 .PHONY: run-unit-test
 run-unit-test:
-	go test -race -count=1 -coverprofile=${COVERAGE} ${PACKAGES}
+	go test -coverprofile=${COVERAGE} ${PACKAGES}
+
+.PHONY: test-race
+test-race:
+	go test -race -count=1 ${PACKAGES}
 
 .PHONY: generate-coverage
 generate-coverage: test
@@ -101,7 +105,7 @@ run-integ-test:
 	# Also adding count=1 so the test results aren't cached.
 	# This command also targets files with the build integration tag
 	# and runs tests which end in Integration.
-	go test -race -count=1 -timeout 60m -tags=integration ${PACKAGES}
+	go test -race -count=1 -timeout 120m -tags=integration ${PACKAGES}
 
 .PHONY: local-integ-test
 local-integ-test: package-custom-resources run-local-integ-test package-custom-resources-clean
@@ -115,6 +119,16 @@ e2e: build-e2e
 	docker build -t copilot/e2e . -f e2e/Dockerfile
 	@echo "Running E2E Tests" &&\
 	docker run --privileged -v ${HOME}/.aws:/home/.aws -e "HOME=/home" copilot/e2e:latest
+
+.PHONY: e2e-dryrun
+e2e-dryrun: build # Sample command "make e2e-dryrun test=multi-env-app" to run the test suit under "e2e/multi-env-app"
+	@echo "Install ginkgo"
+	go install github.com/onsi/ginkgo/ginkgo@latest
+	@echo "Setup credentials"
+	./scripts/e2e-dryrun-creds.sh
+	@echo "Run the $(test) test"
+	cd e2e/$(test) && DRYRUN=true ginkgo -v -r
+	cd -
 
 .PHONY: tools
 tools:
@@ -130,6 +144,7 @@ site-local:
 gen-mocks: tools
 	GOBIN=${GOBIN} go get github.com/golang/mock/mockgen
 	# TODO: make this more extensible?
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/sessions/mocks/mock_sessions.go -source=./internal/pkg/aws/sessions/sessions.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/cli/mocks/mock_rg.go -source=./internal/pkg/cli/env_delete.go resourceGetter
 	${GOBIN}/mockgen -source=./internal/pkg/term/progress/spinner.go -package=mocks -destination=./internal/pkg/term/progress/mocks/mock_spinner.go
 	${GOBIN}/mockgen -source=./internal/pkg/term/progress/render.go -package=mocks -destination=./internal/pkg/term/progress/mocks/mock_render.go
@@ -146,15 +161,18 @@ gen-mocks: tools
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_backend_service.go -source=./internal/pkg/describe/backend_service.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_service.go -source=./internal/pkg/describe/service.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_describe.go -source=./internal/pkg/describe/describe.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_env.go -source=./internal/pkg/describe/env.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/stack/mocks/mock_stack.go -source=./internal/pkg/describe/stack/stack.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_status.go -source=./internal/pkg/describe/status.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_pipeline_show.go -source=./internal/pkg/describe/pipeline_show.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_pipeline_status.go -source=./internal/pkg/describe/pipeline_status.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_status_describe.go -source=./internal/pkg/describe/status_describe.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/ecr/mocks/mock_ecr.go -source=./internal/pkg/aws/ecr/ecr.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/ecs/mocks/mock_ecs.go -source=./internal/pkg/aws/ecs/ecs.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/ec2/mocks/mock_ec2.go -source=./internal/pkg/aws/ec2/ec2.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/identity/mocks/mock_identity.go -source=./internal/pkg/aws/identity/identity.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/route53/mocks/mock_route53.go -source=./internal/pkg/aws/route53/route53.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/route53/mocks/mock_domain.go -source=./internal/pkg/aws/route53/domain.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/iam/mocks/mock_iam.go -source=./internal/pkg/aws/iam/iam.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/secretsmanager/mocks/mock_secretsmanager.go -source=./internal/pkg/aws/secretsmanager/secretsmanager.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/codepipeline/mocks/mock_codepipeline.go -source=./internal/pkg/aws/codepipeline/codepipeline.go
@@ -164,6 +182,7 @@ gen-mocks: tools
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/resourcegroups/mocks/mock_resourcegroups.go -source=./internal/pkg/aws/resourcegroups/resourcegroups.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/cloudwatchlogs/mocks/mock_cloudwatchlogs.go -source=./internal/pkg/aws/cloudwatchlogs/cloudwatchlogs.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/s3/mocks/mock_s3.go -source=./internal/pkg/aws/s3/s3.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/acm/mocks/mock_acm.go -source=./internal/pkg/aws/acm/acm.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/cloudformation/mocks/mock_cloudformation.go -source=./internal/pkg/aws/cloudformation/interfaces.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/cloudformation/stackset/mocks/mock_stackset.go -source=./internal/pkg/aws/cloudformation/stackset/stackset.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/aws/ssm/mocks/mock_ssm.go -source=./internal/pkg/aws/ssm/ssm.go
@@ -179,13 +198,14 @@ gen-mocks: tools
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/deploy/cloudformation/stack/mocks/mock_rd_web_svc.go -source=./internal/pkg/deploy/cloudformation/stack/rd_web_svc.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/deploy/cloudformation/stack/mocks/mock_backend_svc.go -source=./internal/pkg/deploy/cloudformation/stack/backend_svc.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/deploy/cloudformation/stack/mocks/mock_scheduled_job.go -source=./internal/pkg/deploy/cloudformation/stack/scheduled_job.go
-	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/describe/mocks/mock_status_describe.go -source=./internal/pkg/describe/status_describe.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/template/mocks/mock_template.go -source=./internal/pkg/template/template.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/task/mocks/mock_task.go -source=./internal/pkg/task/task.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/repository/mocks/mock_repository.go -source=./internal/pkg/repository/repository.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/logging/mocks/mock_service.go -source=./internal/pkg/logging/service.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/logging/mocks/mock_task.go -source=./internal/pkg/logging/task.go
-	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/list/mocks/mock_list.go -source=./internal/pkg/list/list.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/cli/list/mocks/mock_list.go -source=./internal/pkg/cli/list/list.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/cli/deploy/mocks/mock_deploy.go -source=./internal/pkg/cli/deploy/deploy.go
+	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/cli/deploy/mocks/mock_env.go -source=./internal/pkg/cli/deploy/env.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/initialize/mocks/mock_workload.go -source=./internal/pkg/initialize/workload.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/ecs/mocks/mock_ecs.go -source=./internal/pkg/ecs/ecs.go
 	${GOBIN}/mockgen -package=mocks -destination=./internal/pkg/apprunner/mocks/mock_apprunner.go -source=./internal/pkg/apprunner/apprunner.go

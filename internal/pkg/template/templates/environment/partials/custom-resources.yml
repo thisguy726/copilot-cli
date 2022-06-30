@@ -1,12 +1,3 @@
-EnableLongARNFormatAction:
-  Metadata:
-    'aws:copilot:description': 'Enable long ARN formats for the authenticated AWS principal'
-  Type: Custom::EnableLongARNFormatFunction
-  DependsOn:
-    - EnableLongARNFormatFunction
-  Properties:
-    ServiceToken: !GetAtt EnableLongARNFormatFunction.Arn
-
 DelegateDNSAction:
   Metadata:
     'aws:copilot:description': 'Delegate DNS for environment subdomain'
@@ -45,7 +36,6 @@ CustomDomainAction:
   Metadata:
     'aws:copilot:description': 'Add an A-record to the hosted zone for the domain alias'
   Condition: HasAliases
-  DependsOn: HTTPSCert
   Type: Custom::CustomDomainFunction
   Properties:
     ServiceToken: !GetAtt CustomDomainFunction.Arn
@@ -55,4 +45,4 @@ CustomDomainAction:
     AppDNSRole: !Ref AppDNSDelegationRole
     DomainName: !Ref AppDNSName
     LoadBalancerDNS: !GetAtt PublicLoadBalancer.DNSName
-    LoadBalancerHostedZone: !GetAtt PublicLoadBalancer.CanonicalHostedZoneID 
+    LoadBalancerHostedZone: !GetAtt PublicLoadBalancer.CanonicalHostedZoneID

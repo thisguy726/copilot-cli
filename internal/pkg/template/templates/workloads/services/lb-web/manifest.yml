@@ -8,11 +8,14 @@ type: {{.Type}}
 
 # Distribute traffic to your service.
 http:
+  {{- if .RoutingRule.ProtocolVersion }}
+  version: {{.RoutingRule.ProtocolVersion}}
+  {{- end }}
   # Requests to this path will be forwarded to your service.
   # To match all requests you can use the "/" path.
-  path: '{{.Path}}'
+  path: '{{.RoutingRule.Path}}'
   # You can specify a custom health check path. The default is "/".
-  # healthcheck: '{{.HealthCheck.HealthCheckPath}}'
+  # healthcheck: '{{.RoutingRule.HealthCheck.HealthCheckPath}}'
 
 # Configuration for your containers and service.
 image:
@@ -32,7 +35,9 @@ memory: {{.Memory}}    # Amount of memory in MiB used by the task.
 platform: {{.Platform.PlatformString}}  # See https://aws.github.io/copilot-cli/docs/manifest/lb-web-service/#platform
 {{- end}}
 count: {{.Count.Value}}       # Number of tasks that should be running in your service.
+{{- if not .TaskConfig.IsWindows}}
 exec: true     # Enable running commands in your container.
+{{- end}}
 
 # Optional fields for more advanced use-cases.
 #
@@ -46,3 +51,5 @@ exec: true     # Enable running commands in your container.
 #environments:
 #  test:
 #    count: 2               # Number of tasks to run for the "test" environment.
+#    deployment:            # The deployment strategy for the "test" environment.
+#       rolling: 'recreate' # Stops existing tasks before new ones are started for faster deployments.

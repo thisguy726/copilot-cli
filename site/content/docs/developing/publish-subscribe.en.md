@@ -11,7 +11,7 @@ The combination of these two services effectively decouples the sending and rece
 ## Sending Messages from a Publisher
 
 To allow an existing service to publish messages to SNS, simply set the `publish` field in its manifest.
-You'll need a name for the topic which describes its function.
+We suggest using a name for the topic that describes its function.
 
 ```yaml
 # manifest.yml for api service
@@ -25,7 +25,14 @@ publish:
 
 This will create an [SNS topic](https://docs.aws.amazon.com/sns/latest/dg/welcome.html) and set a resource policy on the topic to allow SQS queues in your AWS account to create subscriptions.
 
-Copilot also injects the ARNs of any SNS topics into your container under the environment variable `COPILOT_SNS_TOPIC_ARNS`. 
+Copilot also injects the ARNs of any SNS topics into your container under the environment variable `COPILOT_SNS_TOPIC_ARNS`.
+The JSON string is of the format:
+```json
+{
+  "firstTopicName": "arn:aws:sns:us-east-1:123456789012:firstTopic",
+  "secondTopicName": "arn:aws:sns:us-east-1:123456789012:secondTopic",
+}
+```
 
 ### Javascript Example
 Once the publishing service has been deployed, you can send messages to SNS via the AWS SDK for SNS. 
@@ -44,7 +51,7 @@ const out = await client.send(new PublishCommand({
 
 To subscribe to an existing SNS topic with a worker service, you'll need to edit the worker service's manifest.
 Using the [`subscribe`](../manifest/worker-service/#subscribe) field in the manifest, you can define subscriptions to 
-existing SNS topics exposed by other services in your environment.  In this example, we'll use the `orders` topic 
+existing SNS topics exposed by other services in your environment.  In this example, we'll use the `ordersTopic` topic 
 which the `api` service from the last section exposed. We'll also customize the worker service's queue to enable a dead-letter queue. 
 The `tries` field tells SQS how many times to try redelivering a failed message before sending it to the DLQ for further inspection.
 
@@ -61,7 +68,7 @@ subscribe:
       tries: 5
 ```
 
-Copilot will create a subscription between this worker service's queue and the `orders` topic from the `api` service. It will also inject the queue URI into the service container under the environment variable `COPILOT_QUEUE_URI`.
+Copilot will create a subscription between this worker service's queue and the `ordersTopic` topic from the `api` service. It will also inject the queue URI into the service container under the environment variable `COPILOT_QUEUE_URI`.
 
 ### Javascript Example
 

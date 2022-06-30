@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	awsecs "github.com/aws/aws-sdk-go/service/ecs"
@@ -316,6 +317,99 @@ func TestClient_DescribeService(t *testing.T) {
 
 			// WHEN
 			get, err := client.DescribeService(mockApp, mockEnv, mockSvc)
+
+			// THEN
+			if test.wantedError != nil {
+				require.EqualError(t, err, test.wantedError.Error())
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, get, test.wanted)
+			}
+		})
+	}
+}
+
+func TestClient_LastUpdatedAt(t *testing.T) {
+	const (
+		mockApp     = "mockApp"
+		mockEnv     = "mockEnv"
+		mockSvc     = "mockSvc"
+		mockSvcARN  = "arn:aws:ecs:us-west-2:1234567890:service/mockCluster/mockService"
+		mockCluster = "mockCluster"
+		mockService = "mockService"
+	)
+	mockError := errors.New("some error")
+	mockTime := time.Unix(1494505756, 0)
+	mockBeforeTime := time.Unix(1494505750, 0)
+	getRgInput := map[string]string{
+		deploy.AppTagKey:     mockApp,
+		deploy.EnvTagKey:     mockEnv,
+		deploy.ServiceTagKey: mockSvc,
+	}
+
+	tests := map[string]struct {
+		setupMocks func(mocks clientMocks)
+
+		wantedError error
+		wanted      time.Time
+	}{
+		"error if fail to describe ECS service": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: mockSvcARN},
+						}, nil),
+					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(nil, mockError),
+				)
+			},
+			wantedError: fmt.Errorf("get ECS service mockService: some error"),
+		},
+		"succeed": {
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.resourceGetter.EXPECT().GetResourcesByTags(serviceResourceType, getRgInput).
+						Return([]*resourcegroups.Resource{
+							{ARN: mockSvcARN},
+						}, nil),
+					m.ecsClient.EXPECT().Service(mockCluster, mockService).Return(&ecs.Service{
+						Deployments: []*awsecs.Deployment{
+							{
+								UpdatedAt: &mockTime,
+							},
+							{
+								UpdatedAt: &mockBeforeTime,
+							},
+						},
+					}, nil),
+				)
+			},
+			wanted: mockTime,
+		},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// GIVEN
+			mockRgGetter := mocks.NewMockresourceGetter(ctrl)
+			mockECSClient := mocks.NewMockecsClient(ctrl)
+			mocks := clientMocks{
+				resourceGetter: mockRgGetter,
+				ecsClient:      mockECSClient,
+			}
+
+			test.setupMocks(mocks)
+
+			client := Client{
+				rgGetter:  mockRgGetter,
+				ecsClient: mockECSClient,
+			}
+
+			// WHEN
+			get, err := client.LastUpdatedAt(mockApp, mockEnv, mockSvc)
 
 			// THEN
 			if test.wantedError != nil {
@@ -1134,7 +1228,7 @@ func Test_NetworkConfigurationForJob(t *testing.T) {
               "Resource": "arn:aws:states:::ecs:runTask.sync",
               "Parameters": {
                 "LaunchType": "FARGATE",
-                "PlatformVersion": "1.4.0",
+                "PlatformVersion": "LATEST",
                 "Cluster": "cluster",
                 "TaskDefinition": "def",
                 "PropagateTags": "TASK_DEFINITION",
@@ -1257,6 +1351,98 @@ func Test_NetworkConfigurationForJob(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, get, tc.wantedConfig)
+			}
+		})
+	}
+}
+
+func Test_HasNonZeroExitCode(t *testing.T) {
+	testCases := map[string]struct {
+		inTaskARNs  []string
+		inGroupName string
+		inCluster   string
+		setupMocks  func(m clientMocks)
+
+		wantedError error
+	}{
+
+		"returns the non zero exit code of the essential container": {
+			inCluster:  "cluster-1",
+			inTaskARNs: []string{"mockTask1"},
+			setupMocks: func(m clientMocks) {
+				gomock.InOrder(
+					m.ecsClient.EXPECT().DescribeTasks("cluster-1", []string{"mockTask1"}).Return([]*ecs.Task{
+						{
+							TaskArn:           aws.String("arn:aws:ecs:us-west-2:123456789:task/4082490ee6c245e09d2145010aa1ba8d"),
+							TaskDefinitionArn: aws.String("arn:aws:ecs:us-west-2:1233454566:task-definition/CdkExampleStacknametaskdefinitionCA96DCAA:1"),
+							StoppedReason:     aws.String("Task failed to start"),
+							LastStatus:        aws.String("STOPPED"),
+							Containers: []*awsecs.Container{
+								{
+									Name:     aws.String("the-one-and-only-one-container"),
+									ExitCode: aws.Int64(1),
+								},
+							},
+						},
+					}, nil),
+					m.ecsClient.EXPECT().TaskDefinition("arn:aws:ecs:us-west-2:1233454566:task-definition/CdkExampleStacknametaskdefinitionCA96DCAA:1").Return(&ecs.TaskDefinition{
+						ExecutionRoleArn: aws.String("execution-role"),
+						TaskRoleArn:      aws.String("task-role"),
+						ContainerDefinitions: []*awsecs.ContainerDefinition{
+							{
+								Name:       aws.String("the-one-and-only-one-container"),
+								Image:      aws.String("beautiful-image"),
+								EntryPoint: aws.StringSlice([]string{"enter", "here"}),
+								Command:    aws.StringSlice([]string{"do", "not", "enter", "here"}),
+								Essential:  aws.Bool(true),
+								Environment: []*awsecs.KeyValuePair{
+									{
+										Name:  aws.String("enter"),
+										Value: aws.String("no"),
+									},
+									{
+										Name:  aws.String("kidding"),
+										Value: aws.String("yes"),
+									},
+								},
+								Secrets: []*awsecs.Secret{
+									{
+										Name:      aws.String("truth"),
+										ValueFrom: aws.String("go-ask-the-wise"),
+									},
+								},
+							},
+						},
+					}, nil),
+				)
+			},
+			wantedError: fmt.Errorf("container the-one-and-only-one-container in task 4082490ee6c245e09d2145010aa1ba8d exited with status code 1"),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			// GIVEN
+			ctrl := gomock.NewController(t)
+			defer ctrl.Finish()
+
+			// GIVEN
+			m := clientMocks{
+				ecsClient: mocks.NewMockecsClient(ctrl),
+			}
+
+			tc.setupMocks(m)
+
+			client := Client{
+				ecsClient: m.ecsClient,
+			}
+
+			// WHEN
+			err := client.HasNonZeroExitCode(tc.inTaskARNs, tc.inCluster)
+
+			// THEN
+			if tc.wantedError != nil {
+				require.EqualError(t, err, tc.wantedError.Error())
 			}
 		})
 	}

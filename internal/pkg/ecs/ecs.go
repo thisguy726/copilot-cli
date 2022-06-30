@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/copilot-cli/internal/pkg/aws/stepfunctions"
@@ -34,6 +35,7 @@ type resourceGetter interface {
 
 type ecsClient interface {
 	DefaultCluster() (string, error)
+	Service(clusterName, serviceName string) (*ecs.Service, error)
 	NetworkConfiguration(cluster, serviceName string) (*ecs.NetworkConfiguration, error)
 	RunningTasks(cluster string) ([]*ecs.Task, error)
 	RunningTasksInFamily(cluster, family string) ([]*ecs.Task, error)
@@ -42,6 +44,7 @@ type ecsClient interface {
 	StopTasks(tasks []string, opts ...ecs.StopTasksOpts) error
 	TaskDefinition(taskDefName string) (*ecs.TaskDefinition, error)
 	UpdateService(clusterName, serviceName string, opts ...ecs.UpdateServiceOpts) error
+	DescribeTasks(cluster string, taskARNs []string) ([]*ecs.Task, error)
 }
 
 type stepFunctionsClient interface {
@@ -107,6 +110,19 @@ func (c Client) DescribeService(app, env, svc string) (*ServiceDesc, error) {
 		Tasks:        tasks,
 		StoppedTasks: stoppedTasks,
 	}, nil
+}
+
+// LastUpdatedAt returns the last updated time of the ECS service.
+func (c Client) LastUpdatedAt(app, env, svc string) (time.Time, error) {
+	clusterName, serviceName, err := c.fetchAndParseServiceARN(app, env, svc)
+	if err != nil {
+		return time.Time{}, err
+	}
+	detail, err := c.ecsClient.Service(clusterName, serviceName)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("get ECS service %s: %w", serviceName, err)
+	}
+	return aws.TimeValue(detail.Deployments[0].UpdatedAt), nil
 }
 
 // ListActiveAppEnvTasksOpts contains the parameters for ListActiveAppEnvTasks.
@@ -449,4 +465,42 @@ func (c Client) stateMachineARN(app, env, job string) (string, error) {
 		return "", fmt.Errorf("state machine for job %s not found", job)
 	}
 	return stateMachineARN, nil
+}
+
+// HasNonZeroExitCode returns an error if at least one of the tasks exited with a non-zero exit code. It assumes that all tasks are built on the same task definition.
+func (c Client) HasNonZeroExitCode(taskARNs []string, cluster string) error {
+	tasks, err := c.ecsClient.DescribeTasks(cluster, taskARNs)
+	if err != nil {
+		return fmt.Errorf("describe tasks %s: %w", taskARNs, err)
+	}
+
+	if len(tasks) == 0 {
+		return fmt.Errorf("cannot find tasks %s", strings.Join(taskARNs, ", "))
+	}
+
+	taskDefinitonARN := aws.StringValue(tasks[0].TaskDefinitionArn)
+	taskDefinition, err := c.ecsClient.TaskDefinition(taskDefinitonARN)
+	if err != nil {
+		return fmt.Errorf("get task definition %s: %w", taskDefinitonARN, err)
+	}
+
+	isContainerEssential := make(map[string]bool)
+	for _, container := range taskDefinition.ContainerDefinitions {
+		isContainerEssential[aws.StringValue(container.Name)] = aws.BoolValue(container.Essential)
+	}
+
+	for _, describedTask := range tasks {
+		for _, container := range describedTask.Containers {
+			if isContainerEssential[aws.StringValue(container.Name)] && aws.Int64Value(container.ExitCode) != 0 {
+				taskID, err := ecs.TaskID(aws.StringValue(describedTask.TaskArn))
+				if err != nil {
+					return err
+				}
+				return &ErrExitCode{aws.StringValue(container.Name),
+					taskID,
+					int(aws.Int64Value(container.ExitCode))}
+			}
+		}
+	}
+	return nil
 }

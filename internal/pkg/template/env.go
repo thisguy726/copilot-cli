@@ -6,14 +6,54 @@ package template
 import (
 	"bytes"
 	"fmt"
-
-	"github.com/aws/copilot-cli/internal/pkg/config"
 )
 
 const (
 	envCFTemplatePath       = "environment/cf.yml"
 	fmtEnvCFSubTemplatePath = "environment/partials/%s.yml"
 )
+
+// Latest available env-controller managed feature names.
+const (
+	ALBFeatureName         = "ALBWorkloads"
+	EFSFeatureName         = "EFSWorkloads"
+	NATFeatureName         = "NATWorkloads"
+	InternalALBFeatureName = "InternalALBWorkloads"
+)
+
+var friendlyEnvFeatureName = map[string]string{
+	ALBFeatureName:         "ALB",
+	EFSFeatureName:         "EFS",
+	NATFeatureName:         "NAT Gateway",
+	InternalALBFeatureName: "Internal ALB",
+}
+
+var leastVersionForFeature = map[string]string{
+	ALBFeatureName:         "v1.0.0",
+	EFSFeatureName:         "v1.3.0",
+	NATFeatureName:         "v1.3.0",
+	InternalALBFeatureName: "v1.10.0",
+}
+
+// AvailableEnvFeatures returns a list of the latest available feature, named after their corresponding parameter names.
+func AvailableEnvFeatures() []string {
+	return []string{ALBFeatureName, EFSFeatureName, NATFeatureName, InternalALBFeatureName}
+}
+
+// FriendlyEnvFeatureName returns a user-friendly feature name given a env-controller managed parameter name.
+// If there isn't one, it returns the parameter name that it is given.
+func FriendlyEnvFeatureName(feature string) string {
+	friendly, ok := friendlyEnvFeatureName[feature]
+	if !ok {
+		return feature
+	}
+	return friendly
+}
+
+// LeastVersionForFeature maps each feature to the least environment template version it requires.
+func LeastVersionForFeature(feature string) string {
+	return leastVersionForFeature[feature]
+}
 
 var (
 	// Template names under "environment/partials/".
@@ -31,18 +71,54 @@ var (
 // EnvOpts holds data that can be provided to enable features in an environment stack template.
 type EnvOpts struct {
 	AppName string // The application name. Needed to create default value for svc discovery endpoint for upgraded environments.
+	EnvName string
 	Version string // The template version to use for the environment. If empty uses the "legacy" template.
 
+	// Custom Resourced backed by Lambda functions.
+	CustomResources           map[string]S3ObjectLocation
 	DNSDelegationLambda       string
 	DNSCertValidatorLambda    string
 	EnableLongARNFormatLambda string
 	CustomDomainLambda        string
-	ScriptBucketName          string
 
-	ImportVPC *config.ImportVPC
-	VPCConfig *config.AdjustVPC
+	ScriptBucketName     string
+	ArtifactBucketARN    string
+	ArtifactBucketKeyARN string
+
+	VPCConfig                VPCConfig
+	PublicImportedCertARNs   []string
+	PrivateImportedCertARNs  []string
+	CustomInternalALBSubnets []string
+	AllowVPCIngress          bool
+	Telemetry                *Telemetry
 
 	LatestVersion string
+	Manifest      string // Serialized manifest used to render the environment template.
+}
+
+type VPCConfig struct {
+	Imported *ImportVPC // If not-nil, use the imported VPC resources instead of the Managed VPC.
+	Managed  ManagedVPC
+}
+
+// ImportVPC holds the fields to import VPC resources.
+type ImportVPC struct {
+	ID               string
+	PublicSubnetIDs  []string
+	PrivateSubnetIDs []string
+}
+
+// ManagedVPC holds the fields to configure a managed VPC.
+type ManagedVPC struct {
+	CIDR               string
+	AZs                []string
+	PublicSubnetCIDRs  []string
+	PrivateSubnetCIDRs []string
+}
+
+// Telemetry represents optional observability and monitoring configuration.
+type Telemetry struct {
+	EnableContainerInsights bool
 }
 
 // ParseEnv parses an environment's CloudFormation template with the specified data object and returns its content.

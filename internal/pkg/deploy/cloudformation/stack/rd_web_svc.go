@@ -5,6 +5,7 @@ package stack
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
 
@@ -40,28 +41,16 @@ var awsSDKLayerForRegion = map[string]*string{
 
 type requestDrivenWebSvcReadParser interface {
 	template.ReadParser
-	ParseRequestDrivenWebService(template.ParseRequestDrivenWebServiceInput) (*template.Content, error)
+	ParseRequestDrivenWebService(template.WorkloadOpts) (*template.Content, error)
 }
 
 // RequestDrivenWebService represents the configuration needed to create a CloudFormation stack from a request-drive web service manifest.
 type RequestDrivenWebService struct {
 	*appRunnerWkld
-	manifest            *manifest.RequestDrivenWebService
-	app                 deploy.AppInformation
-	customResourceS3URL map[string]string
+	manifest *manifest.RequestDrivenWebService
+	app      deploy.AppInformation
 
 	parser requestDrivenWebSvcReadParser
-}
-
-// NewRequestDrivenWebServiceWithAlias creates a new RequestDrivenWebService stack from a manifest file. It creates
-// custom resources needed for alias with scripts accessible from the urls.
-func NewRequestDrivenWebServiceWithAlias(mft *manifest.RequestDrivenWebService, env string, app deploy.AppInformation, rc RuntimeConfig, urls map[string]string) (*RequestDrivenWebService, error) {
-	rdSvc, err := NewRequestDrivenWebService(mft, env, app, rc)
-	if err != nil {
-		return nil, err
-	}
-	rdSvc.customResourceS3URL = urls
-	return rdSvc, nil
 }
 
 // NewRequestDrivenWebService creates a new RequestDrivenWebService stack from a manifest file.
@@ -94,42 +83,52 @@ func NewRequestDrivenWebService(mft *manifest.RequestDrivenWebService, env strin
 
 // Template returns the CloudFormation template for the service parametrized for the environment.
 func (s *RequestDrivenWebService) Template() (string, error) {
-	outputs, err := s.addonsOutputs()
+	crs, err := convertCustomResources(s.rc.CustomResourcesURL)
 	if err != nil {
 		return "", err
 	}
-
-	var layerARN, bucket, dnsDelegationRole, dnsName *string
-	var urls map[string]*string
+	networkConfig := convertRDWSNetworkConfig(s.manifest.Network)
+	addonsParams, err := s.addonsParameters()
+	if err != nil {
+		return "", err
+	}
+	addonsOutputs, err := s.addonsOutputs()
+	if err != nil {
+		return "", err
+	}
+	var layerARN, dnsDelegationRole, dnsName *string
 	if s.manifest.Alias != nil {
-		bucket, urls, err = parseS3URLs(s.customResourceS3URL)
-		if err != nil {
-			return "", err
-		}
 		dnsDelegationRole, dnsName = convertAppInformation(s.app)
 		layerARN = awsSDKLayerForRegion[s.rc.Region]
 	}
-
 	publishers, err := convertPublish(s.manifest.Publish(), s.rc.AccountID, s.rc.Region, s.app.Name, s.env, s.name)
 	if err != nil {
 		return "", fmt.Errorf(`convert "publish" field for service %s: %w`, s.name, err)
 	}
-
-	content, err := s.parser.ParseRequestDrivenWebService(template.ParseRequestDrivenWebServiceInput{
-		Variables:         s.manifest.Variables,
-		StartCommand:      s.manifest.StartCommand,
-		Tags:              s.manifest.Tags,
-		NestedStack:       outputs,
-		EnableHealthCheck: !s.healthCheckConfig.IsEmpty(),
-
+	content, err := s.parser.ParseRequestDrivenWebService(template.WorkloadOpts{
+		AppName:              s.wkld.app,
+		EnvName:              s.env,
+		WorkloadName:         s.name,
+		Variables:            s.manifest.Variables,
+		StartCommand:         s.manifest.StartCommand,
+		Tags:                 s.manifest.Tags,
+		NestedStack:          addonsOutputs,
+		AddonsExtraParams:    addonsParams,
+		EnableHealthCheck:    !s.healthCheckConfig.IsEmpty(),
+		WorkloadType:         manifest.RequestDrivenWebServiceType,
 		Alias:                s.manifest.Alias,
-		ScriptBucketName:     bucket,
-		CustomDomainLambda:   urls[template.AppRunnerCustomDomainLambdaFileName],
+		CustomResources:      crs,
 		AWSSDKLayer:          layerARN,
 		AppDNSDelegationRole: dnsDelegationRole,
 		AppDNSName:           dnsName,
+		Network:              networkConfig,
 
-		Publish: publishers,
+		Publish:                  publishers,
+		ServiceDiscoveryEndpoint: s.rc.ServiceDiscoveryEndpoint,
+
+		Observability: template.ObservabilityOpts{
+			Tracing: strings.ToUpper(aws.StringValue(s.manifest.Observability.Tracing)),
+		},
 	})
 	if err != nil {
 		return "", err

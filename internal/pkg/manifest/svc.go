@@ -1,7 +1,6 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-// Package manifest provides functionality to create Manifest files.
 package manifest
 
 import (
@@ -27,12 +26,14 @@ const (
 	WorkerServiceType = "Worker Service"
 )
 
-// ServiceTypes are the supported service manifest types.
-var ServiceTypes = []string{
-	RequestDrivenWebServiceType,
-	LoadBalancedWebServiceType,
-	BackendServiceType,
-	WorkerServiceType,
+// ServiceTypes returns the list of supported service manifest types.
+func ServiceTypes() []string {
+	return []string{
+		RequestDrivenWebServiceType,
+		LoadBalancedWebServiceType,
+		BackendServiceType,
+		WorkerServiceType,
+	}
 }
 
 // Range contains either a Range or a range configuration for Autoscaling ranges.
@@ -136,13 +137,6 @@ func (c *Count) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 
-	if c.AdvancedCount.Spot != nil && (c.AdvancedCount.hasAutoscaling()) {
-		return &errFieldMutualExclusive{
-			firstField:  "spot",
-			secondField: "range/cpu_percentage/memory_percentage/requests/response_time/queue_delay",
-		}
-	}
-
 	if !c.AdvancedCount.IsEmpty() {
 		// Successfully unmarshalled AdvancedCount fields, return
 		return nil
@@ -150,6 +144,30 @@ func (c *Count) UnmarshalYAML(value *yaml.Node) error {
 
 	if err := value.Decode(&c.Value); err != nil {
 		return errUnmarshalCountOpts
+	}
+	return nil
+}
+
+// UnmarshalYAML overrides the default YAML unmarshaling logic for the ScalingConfigOrT
+// struct, allowing it to perform more complex unmarshaling behavior.
+// This method implements the yaml.Unmarshaler (v3) interface.
+func (r *ScalingConfigOrT[_]) UnmarshalYAML(value *yaml.Node) error {
+	if err := value.Decode(&r.ScalingConfig); err != nil {
+		switch err.(type) {
+		case *yaml.TypeError:
+			break
+		default:
+			return err
+		}
+	}
+
+	if !r.ScalingConfig.IsEmpty() {
+		// Successfully unmarshalled ScalingConfig fields, return
+		return nil
+	}
+
+	if err := value.Decode(&r.Value); err != nil {
+		return errors.New(`unable to unmarshal into int or composite-style map`)
 	}
 	return nil
 }
@@ -178,24 +196,58 @@ func (c *Count) Desired() (*int, error) {
 // Percentage represents a valid percentage integer ranging from 0 to 100.
 type Percentage int
 
+// ScalingConfigOrT represents a resource that has autoscaling configurations or a generic value.
+type ScalingConfigOrT[T ~int | time.Duration] struct {
+	Value         *T
+	ScalingConfig AdvancedScalingConfig[T] // mutually exclusive with Value
+}
+
+// AdvancedScalingConfig represents advanced configurable options for a scaling policy.
+type AdvancedScalingConfig[T ~int | time.Duration] struct {
+	Value    *T       `yaml:"value"`
+	Cooldown Cooldown `yaml:"cooldown"`
+}
+
+// Cooldown represents the autoscaling cooldown of resources.
+type Cooldown struct {
+	ScaleInCooldown  *time.Duration `yaml:"in"`
+	ScaleOutCooldown *time.Duration `yaml:"out"`
+}
+
 // AdvancedCount represents the configurable options for Auto Scaling as well as
 // Capacity configuration (spot).
 type AdvancedCount struct {
-	Spot         *int           `yaml:"spot"` // mutually exclusive with other fields
-	Range        Range          `yaml:"range"`
-	CPU          *Percentage    `yaml:"cpu_percentage"`
-	Memory       *Percentage    `yaml:"memory_percentage"`
-	Requests     *int           `yaml:"requests"`
-	ResponseTime *time.Duration `yaml:"response_time"`
-	QueueScaling QueueScaling   `yaml:"queue_delay"`
+	Spot         *int                            `yaml:"spot"` // mutually exclusive with other fields
+	Range        Range                           `yaml:"range"`
+	Cooldown     Cooldown                        `yaml:"cooldown"`
+	CPU          ScalingConfigOrT[Percentage]    `yaml:"cpu_percentage"`
+	Memory       ScalingConfigOrT[Percentage]    `yaml:"memory_percentage"`
+	Requests     ScalingConfigOrT[int]           `yaml:"requests"`
+	ResponseTime ScalingConfigOrT[time.Duration] `yaml:"response_time"`
+	QueueScaling QueueScaling                    `yaml:"queue_delay"`
 
 	workloadType string
 }
 
+// IsEmpty returns whether ScalingConfigOrT is empty
+func (r *ScalingConfigOrT[_]) IsEmpty() bool {
+	return r.ScalingConfig.IsEmpty() && r.Value == nil
+}
+
+// IsEmpty returns whether AdvancedScalingConfig is empty
+func (a *AdvancedScalingConfig[_]) IsEmpty() bool {
+	return a.Cooldown.IsEmpty() && a.Value == nil
+}
+
+// IsEmpty returns whether Cooldown is empty
+func (c *Cooldown) IsEmpty() bool {
+	return c.ScaleInCooldown == nil && c.ScaleOutCooldown == nil
+}
+
 // IsEmpty returns whether AdvancedCount is empty.
 func (a *AdvancedCount) IsEmpty() bool {
-	return a.Range.IsEmpty() && a.CPU == nil && a.Memory == nil &&
-		a.Requests == nil && a.ResponseTime == nil && a.Spot == nil && a.QueueScaling.IsEmpty()
+	return a.Range.IsEmpty() && a.CPU.IsEmpty() && a.Memory.IsEmpty() && a.Cooldown.IsEmpty() &&
+		a.Requests.IsEmpty() && a.ResponseTime.IsEmpty() && a.Spot == nil && a.QueueScaling.IsEmpty()
 }
 
 // IgnoreRange returns whether desiredCount is specified on spot capacity
@@ -212,7 +264,7 @@ func (a *AdvancedCount) validScalingFields() []string {
 	case LoadBalancedWebServiceType:
 		return []string{"cpu_percentage", "memory_percentage", "requests", "response_time"}
 	case BackendServiceType:
-		return []string{"cpu_percentage", "memory_percentage"}
+		return []string{"cpu_percentage", "memory_percentage", "requests", "response_time"}
 	case WorkerServiceType:
 		return []string{"cpu_percentage", "memory_percentage", "queue_delay"}
 	default:
@@ -223,22 +275,23 @@ func (a *AdvancedCount) validScalingFields() []string {
 func (a *AdvancedCount) hasScalingFieldsSet() bool {
 	switch a.workloadType {
 	case LoadBalancedWebServiceType:
-		return a.CPU != nil || a.Memory != nil || a.Requests != nil || a.ResponseTime != nil
+		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty()
 	case BackendServiceType:
-		return a.CPU != nil || a.Memory != nil
+		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty()
 	case WorkerServiceType:
-		return a.CPU != nil || a.Memory != nil || !a.QueueScaling.IsEmpty()
+		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.QueueScaling.IsEmpty()
 	default:
-		return a.CPU != nil || a.Memory != nil || a.Requests != nil || a.ResponseTime != nil || !a.QueueScaling.IsEmpty()
+		return !a.CPU.IsEmpty() || !a.Memory.IsEmpty() || !a.Requests.IsEmpty() || !a.ResponseTime.IsEmpty() || !a.QueueScaling.IsEmpty()
 	}
 }
 
 func (a *AdvancedCount) unsetAutoscaling() {
 	a.Range = Range{}
-	a.CPU = nil
-	a.Memory = nil
-	a.Requests = nil
-	a.ResponseTime = nil
+	a.Cooldown = Cooldown{}
+	a.CPU = ScalingConfigOrT[Percentage]{}
+	a.Memory = ScalingConfigOrT[Percentage]{}
+	a.Requests = ScalingConfigOrT[int]{}
+	a.ResponseTime = ScalingConfigOrT[time.Duration]{}
 	a.QueueScaling = QueueScaling{}
 }
 
@@ -246,11 +299,12 @@ func (a *AdvancedCount) unsetAutoscaling() {
 type QueueScaling struct {
 	AcceptableLatency *time.Duration `yaml:"acceptable_latency"`
 	AvgProcessingTime *time.Duration `yaml:"msg_processing_time"`
+	Cooldown          Cooldown       `yaml:"cooldown"`
 }
 
 // IsEmpty returns true if the QueueScaling is set.
 func (qs *QueueScaling) IsEmpty() bool {
-	return qs.AcceptableLatency == nil && qs.AvgProcessingTime == nil
+	return qs.AcceptableLatency == nil && qs.AvgProcessingTime == nil && qs.Cooldown.IsEmpty()
 }
 
 // AcceptableBacklogPerTask returns the total number of messages that each task can accumulate in the queue
@@ -259,20 +313,13 @@ func (qs *QueueScaling) AcceptableBacklogPerTask() (int, error) {
 	if qs.IsEmpty() {
 		return 0, errors.New(`"queue_delay" must be specified in order to calculate the acceptable backlog`)
 	}
-	if err := qs.Validate(); err != nil {
-		return 0, err
-	}
 	v := math.Ceil(float64(*qs.AcceptableLatency) / float64(*qs.AvgProcessingTime))
 	return int(v), nil
 }
 
-// ServiceDockerfileBuildRequired returns if the service container image should be built from local Dockerfile.
-func ServiceDockerfileBuildRequired(svc interface{}) (bool, error) {
-	return dockerfileBuildRequired("service", svc)
-}
-
+// IsTypeAService returns if manifest type is service.
 func IsTypeAService(t string) bool {
-	for _, serviceType := range ServiceTypes {
+	for _, serviceType := range ServiceTypes() {
 		if t == serviceType {
 			return true
 		}
@@ -286,6 +333,7 @@ func IsTypeAService(t string) bool {
 // See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html.
 type HTTPHealthCheckArgs struct {
 	Path               *string        `yaml:"path"`
+	Port               *int           `yaml:"port"`
 	SuccessCodes       *string        `yaml:"success_codes"`
 	HealthyThreshold   *int64         `yaml:"healthy_threshold"`
 	UnhealthyThreshold *int64         `yaml:"unhealthy_threshold"`
@@ -295,7 +343,7 @@ type HTTPHealthCheckArgs struct {
 }
 
 func (h *HTTPHealthCheckArgs) isEmpty() bool {
-	return h.Path == nil && h.HealthyThreshold == nil && h.UnhealthyThreshold == nil &&
+	return h.Path == nil && h.Port == nil && h.SuccessCodes == nil && h.HealthyThreshold == nil && h.UnhealthyThreshold == nil &&
 		h.Interval == nil && h.Timeout == nil && h.GracePeriod == nil
 }
 
@@ -345,4 +393,36 @@ func (hc *HealthCheckArgsOrString) Path() *string {
 		return hc.HealthCheckPath
 	}
 	return hc.HealthCheckArgs.Path
+}
+
+// NLBHealthCheckArgs holds the configuration to determine if the network load balanced web service is healthy.
+// These options are specifiable under the "healthcheck" field.
+// See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-elasticloadbalancingv2-targetgroup.html.
+type NLBHealthCheckArgs struct {
+	Port               *int           `yaml:"port"`
+	HealthyThreshold   *int64         `yaml:"healthy_threshold"`
+	UnhealthyThreshold *int64         `yaml:"unhealthy_threshold"`
+	Timeout            *time.Duration `yaml:"timeout"`
+	Interval           *time.Duration `yaml:"interval"`
+}
+
+func (h *NLBHealthCheckArgs) isEmpty() bool {
+	return h.Port == nil && h.HealthyThreshold == nil && h.UnhealthyThreshold == nil && h.Timeout == nil && h.Interval == nil
+}
+
+// ParsePortMapping parses port-protocol string into individual port and protocol strings.
+// Valid examples: 2000/udp, or 2000.
+func ParsePortMapping(s *string) (port *string, protocol *string, err error) {
+	if s == nil {
+		return nil, nil, nil
+	}
+	portProtocol := strings.Split(*s, "/")
+	switch len(portProtocol) {
+	case 1:
+		return aws.String(portProtocol[0]), nil, nil
+	case 2:
+		return aws.String(portProtocol[0]), aws.String(portProtocol[1]), nil
+	default:
+		return nil, nil, fmt.Errorf("cannot parse port mapping from %s", *s)
+	}
 }

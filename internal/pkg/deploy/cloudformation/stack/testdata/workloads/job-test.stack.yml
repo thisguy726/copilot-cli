@@ -25,9 +25,15 @@ Parameters:
     Description: 'URL of the addons nested stack template within the S3 bucket.'
     Type: String
     Default: ""
+  EnvFileARN:
+    Description: 'URL of the environment file.'
+    Type: String
+    Default: ""
 Conditions: 
   HasAddons: # If a bucket URL is specified, that means the template exists.
     !Not [!Equals [!Ref AddonsTemplateURL, ""]]
+  HasEnvFile:
+    !Not [!Equals [!Ref EnvFileARN, ""]]
 Resources: 
   LogGroup:
     Metadata:
@@ -52,8 +58,8 @@ Resources:
     Type: AWS::Lambda::Function
     Properties:
       Code:
-        ZipFile: |
-          Abracadabra
+        S3Bucket:
+        S3Key:
       Handler: "index.handler"
       Timeout: 900
       MemorySize: 512
@@ -61,6 +67,8 @@ Resources:
       Runtime: nodejs12.x
 
   EnvControllerRole:
+    Metadata:
+      'aws:copilot:description': "An IAM role to update your environment stack"
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -117,8 +125,8 @@ Resources:
       Memory: !Ref TaskMemory
       EphemeralStorage:
         SizeInGiB: 200
-      ExecutionRoleArn: !Ref ExecutionRole
-      TaskRoleArn: !Ref TaskRole
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
       ContainerDefinitions:
         - Name: !Ref WorkloadName
           Image: !Ref ContainerImage
@@ -136,7 +144,12 @@ Resources:
             Value: !Sub '${WorkloadName}'
           - Name: COPILOT_MOUNT_POINTS
             Value: '{"managedEFSVolume":"/etc/mount1"}'
-          
+          EnvironmentFiles:
+          - !If
+            - HasEnvFile
+            - Type: s3
+              Value: !Ref EnvFileARN
+            - !Ref AWS::NoValue
           LogConfiguration:
             LogDriver: awslogs
             Options:
@@ -168,6 +181,14 @@ Resources:
           PortMappings:
             - ContainerPort: 8080
           Environment:
+            - Name: COPILOT_APPLICATION_NAME
+              Value: !Sub '${AppName}'
+            - Name: COPILOT_SERVICE_DISCOVERY_ENDPOINT
+              Value: test.my-app.local
+            - Name: COPILOT_ENVIRONMENT_NAME
+              Value: !Sub '${EnvName}'
+            - Name: COPILOT_SERVICE_NAME
+              Value: !Sub '${WorkloadName}'
             - Name: NGINX_PORT
               Value: '8080'
             - Name: COPILOT_MOUNT_POINTS
@@ -225,6 +246,28 @@ Resources:
                   - 'kms:Decrypt'
                 Resource:
                   - !Sub 'arn:${AWS::Partition}:kms:${AWS::Region}:${AWS::AccountId}:key/*'
+        - !If
+          - HasEnvFile
+          - PolicyName: !Join ['', [!Ref AppName, '-', !Ref EnvName, '-', !Ref WorkloadName, GetEnvFilePolicy]]
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetObject'
+                  Resource:
+                    - !Ref EnvFileARN
+                - Effect: 'Allow'
+                  Action:
+                    - 's3:GetBucketLocation'
+                  Resource:
+                    - !Join
+                      - ''
+                      - - 'arn:'
+                        - !Ref AWS::Partition
+                        - ':s3:::'
+                        - !Select [0, !Split ['/', !Select [5, !Split [':', !Ref EnvFileARN]]]]
+          - !Ref AWS::NoValue
       ManagedPolicyArns:
         - 'arn:${AWS::Partition}:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
   
@@ -347,7 +390,7 @@ Resources:
               "Resource": "arn:${Partition}:states:::ecs:runTask.sync",
               "Parameters": {
                 "LaunchType": "FARGATE",
-                "PlatformVersion": "1.4.0",
+                "PlatformVersion": "LATEST",
                 "Cluster": "${Cluster}",
                 "TaskDefinition": "${TaskDefinition}",
                 "PropagateTags": "TASK_DEFINITION",
@@ -376,6 +419,8 @@ Resources:
         }      
         
   StateMachineRole:
+    Metadata:
+      'aws:copilot:description': 'An IAM role for a state machine to run ECS tasks in your cluster'
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:

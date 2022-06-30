@@ -6,7 +6,6 @@ package template
 
 import (
 	"bytes"
-	"crypto/sha256"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -16,6 +15,7 @@ import (
 	"text/template"
 
 	"github.com/aws/copilot-cli/internal/pkg/aws/s3"
+	"github.com/aws/copilot-cli/internal/pkg/template/artifactpath"
 )
 
 //go:embed templates
@@ -25,15 +25,14 @@ var templateFS embed.FS
 const (
 	DNSCertValidatorFileName            = "dns-cert-validator"
 	DNSDelegationFileName               = "dns-delegation"
-	EnableLongARNsFileName              = "enable-long-arns"
 	CustomDomainFileName                = "custom-domain"
 	AppRunnerCustomDomainLambdaFileName = "custom-domain-app-runner"
-	AWSSDKLayerFileName                 = "aws-sdk-layer"
+	NLBCertValidatorLambdaFileName      = "nlb-cert-validator"
+	NLBCustomDomainLambdaFileName       = "nlb-custom-domain"
 
 	customResourceRootPath         = "custom-resources"
 	customResourceZippedScriptName = "index.js"
 	scriptDirName                  = "scripts"
-	layerDirName                   = "layers"
 )
 
 // Groups of files that belong to the same stack.
@@ -41,16 +40,14 @@ var (
 	envCustomResourceFiles = []string{
 		DNSCertValidatorFileName,
 		DNSDelegationFileName,
-		EnableLongARNsFileName,
 		CustomDomainFileName,
 	}
-	rdWkldCustomResourceFiles = []string{
-		AppRunnerCustomDomainLambdaFileName,
-	}
-	rdWkldCustomResourceLayers = []string{
-		AWSSDKLayerFileName,
-	}
 )
+
+// Reader is the interface that wraps the Read method.
+type Reader interface {
+	Read(path string) (*Content, error)
+}
 
 // Parser is the interface that wraps the Parse method.
 type Parser interface {
@@ -59,7 +56,7 @@ type Parser interface {
 
 // ReadParser is the interface that wraps the Read and Parse methods.
 type ReadParser interface {
-	Read(path string) (*Content, error)
+	Reader
 	Parser
 }
 
@@ -116,7 +113,7 @@ func (t *Template) Parse(path string, data interface{}, options ...ParseOption) 
 	}
 	buf := new(bytes.Buffer)
 	if err := tpl.Execute(buf, data); err != nil {
-		return nil, fmt.Errorf("execute template %s with data %v: %w", path, data, err)
+		return nil, fmt.Errorf("execute template %s: %w", path, err)
 	}
 	return &Content{buf}, nil
 }
@@ -124,34 +121,6 @@ func (t *Template) Parse(path string, data interface{}, options ...ParseOption) 
 // UploadEnvironmentCustomResources uploads the environment custom resource scripts.
 func (t *Template) UploadEnvironmentCustomResources(upload s3.CompressAndUploadFunc) (map[string]string, error) {
 	return t.uploadCustomResources(upload, envCustomResourceFiles)
-}
-
-//UploadRequestDrivenWebServiceCustomResources uploads the request driven web service custom resource scripts.
-func (t *Template) UploadRequestDrivenWebServiceCustomResources(upload s3.CompressAndUploadFunc) (map[string]string, error) {
-	return t.uploadCustomResources(upload, rdWkldCustomResourceFiles)
-}
-
-// UploadRequestDrivenWebServiceLayers uploads already-zipped layers for a request driven web service.
-func (t *Template) UploadRequestDrivenWebServiceLayers(upload s3.UploadFunc) (map[string]string, error) {
-	urls := make(map[string]string)
-	for _, layerName := range rdWkldCustomResourceLayers {
-		content, err := t.Read(path.Join(customResourceRootPath, fmt.Sprintf("%s.zip", layerName)))
-		if err != nil {
-			return nil, err
-		}
-		name := path.Join(layerDirName, layerName)
-		url, err := upload(fmt.Sprintf("%s/%x", name, sha256.Sum256(content.Bytes())), Uploadable{
-			name:    layerName,
-			content: content.Bytes(),
-		})
-		if err != nil {
-			return nil, fmt.Errorf("upload %s: %w", name, err)
-		}
-
-		urls[layerName] = url
-	}
-
-	return urls, nil
 }
 
 func (t *Template) uploadCustomResources(upload s3.CompressAndUploadFunc, fileNames []string) (map[string]string, error) {
@@ -186,10 +155,10 @@ func (t *Template) uploadFileToCompress(upload s3.CompressAndUploadFunc, file fi
 		contents = append(contents, uploadable.content...)
 		nameBinaries = append(nameBinaries, uploadable)
 	}
-	// Suffix with a SHA256 checksum of the fileToCompress so that
-	// only new content gets a new URL. Otherwise, if two fileToCompresss have the
+	// Prefix with a SHA256 checksum of the fileToCompress so that
+	// only new content gets a new URL. Otherwise, if two fileToCompress have the
 	// same content then the URL generated will be identical.
-	url, err := upload(fmt.Sprintf("%s/%x", file.name, sha256.Sum256(contents)), nameBinaries...)
+	url, err := upload(artifactpath.MkdirSHA256(file.name, contents), nameBinaries...)
 	if err != nil {
 		return "", fmt.Errorf("upload %s: %w", file.name, err)
 	}

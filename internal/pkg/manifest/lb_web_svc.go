@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/imdario/mergo"
-	"gopkg.in/yaml.v3"
+
+	"github.com/aws/copilot-cli/internal/pkg/template"
 )
 
 const (
@@ -21,6 +21,10 @@ const (
 const (
 	DefaultHealthCheckPath        = "/"
 	DefaultHealthCheckGracePeriod = 60
+)
+
+const (
+	GRPCProtocol = "gRPC" // GRPCProtocol is the HTTP protocol version for gRPC.
 )
 
 var (
@@ -48,20 +52,25 @@ type LoadBalancedWebService struct {
 type LoadBalancedWebServiceConfig struct {
 	ImageConfig      ImageWithPortAndHealthcheck `yaml:"image,flow"`
 	ImageOverride    `yaml:",inline"`
-	RoutingRule      `yaml:"http,flow"`
+	RoutingRule      RoutingRuleConfigOrBool `yaml:"http,flow"`
 	TaskConfig       `yaml:",inline"`
 	Logging          `yaml:"logging,flow"`
-	Sidecars         map[string]*SidecarConfig `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
-	Network          NetworkConfig             `yaml:"network"`
-	PublishConfig    PublishConfig             `yaml:"publish"`
-	TaskDefOverrides []OverrideRule            `yaml:"taskdef_overrides"`
+	Sidecars         map[string]*SidecarConfig        `yaml:"sidecars"` // NOTE: keep the pointers because `mergo` doesn't automatically deep merge map's value unless it's a pointer type.
+	Network          NetworkConfig                    `yaml:"network"`
+	PublishConfig    PublishConfig                    `yaml:"publish"`
+	TaskDefOverrides []OverrideRule                   `yaml:"taskdef_overrides"`
+	NLBConfig        NetworkLoadBalancerConfiguration `yaml:"nlb"`
+	DeployConfig     DeploymentConfiguration          `yaml:"deployment"`
+	Observability    Observability                    `yaml:"observability"`
 }
 
 // LoadBalancedWebServiceProps contains properties for creating a new load balanced fargate service manifest.
 type LoadBalancedWebServiceProps struct {
 	*WorkloadProps
-	Path        string
-	Port        uint16
+	Path string
+	Port uint16
+
+	HTTPVersion string               // Optional http protocol version such as gRPC, HTTP2.
 	HealthCheck ContainerHealthCheck // Optional healthcheck configuration.
 	Platform    PlatformArgsOrString // Optional platform configuration.
 }
@@ -69,7 +78,7 @@ type LoadBalancedWebServiceProps struct {
 // NewLoadBalancedWebService creates a new public load balanced web service, receives all the requests from the load balancer,
 // has a single task with minimal CPU and memory thresholds, and sets the default health check path to "/".
 func NewLoadBalancedWebService(props *LoadBalancedWebServiceProps) *LoadBalancedWebService {
-	svc := newDefaultLoadBalancedWebService()
+	svc := newDefaultHTTPLoadBalancedWebService()
 	// Apply overrides.
 	svc.Name = stringP(props.Name)
 	svc.LoadBalancedWebServiceConfig.ImageConfig.Image.Location = stringP(props.Image)
@@ -77,12 +86,32 @@ func NewLoadBalancedWebService(props *LoadBalancedWebServiceProps) *LoadBalanced
 	svc.LoadBalancedWebServiceConfig.ImageConfig.Port = aws.Uint16(props.Port)
 	svc.LoadBalancedWebServiceConfig.ImageConfig.HealthCheck = props.HealthCheck
 	svc.LoadBalancedWebServiceConfig.Platform = props.Platform
+	if isWindowsPlatform(props.Platform) {
+		svc.LoadBalancedWebServiceConfig.TaskConfig.CPU = aws.Int(MinWindowsTaskCPU)
+		svc.LoadBalancedWebServiceConfig.TaskConfig.Memory = aws.Int(MinWindowsTaskMemory)
+	}
+	if props.HTTPVersion != "" {
+		svc.RoutingRule.ProtocolVersion = &props.HTTPVersion
+	}
 	svc.RoutingRule.Path = aws.String(props.Path)
 	svc.parser = template.New()
 	return svc
 }
 
-// newDefaultLoadBalancedWebService returns an empty LoadBalancedWebService with only the default values set.
+// newDefaultHTTPLoadBalancedWebService returns an empty LoadBalancedWebService with only the default values set, including default HTTP configurations.
+func newDefaultHTTPLoadBalancedWebService() *LoadBalancedWebService {
+	lbws := newDefaultLoadBalancedWebService()
+	lbws.RoutingRule = RoutingRuleConfigOrBool{
+		RoutingRuleConfiguration: RoutingRuleConfiguration{
+			HealthCheck: HealthCheckArgsOrString{
+				HealthCheckPath: aws.String(DefaultHealthCheckPath),
+			},
+		},
+	}
+	return lbws
+}
+
+// newDefaultLoadBalancedWebService returns an empty LoadBalancedWebService with only the default values set, without any load balancer configuration.
 func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 	return &LoadBalancedWebService{
 		Workload: Workload{
@@ -90,11 +119,6 @@ func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 		},
 		LoadBalancedWebServiceConfig: LoadBalancedWebServiceConfig{
 			ImageConfig: ImageWithPortAndHealthcheck{},
-			RoutingRule: RoutingRule{
-				HealthCheck: HealthCheckArgsOrString{
-					HealthCheckPath: aws.String(DefaultHealthCheckPath),
-				},
-			},
 			TaskConfig: TaskConfig{
 				CPU:    aws.Int(256),
 				Memory: aws.Int(512),
@@ -110,7 +134,9 @@ func newDefaultLoadBalancedWebService() *LoadBalancedWebService {
 			},
 			Network: NetworkConfig{
 				VPC: vpcConfig{
-					Placement: &PublicSubnetPlacement,
+					Placement: PlacementArgOrString{
+						PlacementString: placementStringP(PublicSubnetPlacement),
+					},
 				},
 			},
 		},
@@ -125,6 +151,17 @@ func (s *LoadBalancedWebService) MarshalBinary() ([]byte, error) {
 		return nil, err
 	}
 	return content.Bytes(), nil
+}
+
+// RequiredEnvironmentFeatures returns environment features that are required for this manifest.
+func (s *LoadBalancedWebService) RequiredEnvironmentFeatures() []string {
+	var features []string
+	if !s.RoutingRule.Disabled() {
+		features = append(features, template.ALBFeatureName)
+	}
+	features = append(features, s.Network.requiredEnvFeatures()...)
+	features = append(features, s.Storage.requiredEnvFeatures()...)
+	return features
 }
 
 // Port returns the exposed port in the manifest.
@@ -146,6 +183,11 @@ func (s *LoadBalancedWebService) BuildRequired() (bool, error) {
 // BuildArgs returns a docker.BuildArguments object given a ws root directory.
 func (s *LoadBalancedWebService) BuildArgs(wsRoot string) *DockerBuildArgs {
 	return s.ImageConfig.Image.BuildConfig(wsRoot)
+}
+
+// EnvFile returns the location of the env file against the ws root directory.
+func (s *LoadBalancedWebService) EnvFile() string {
+	return aws.StringValue(s.TaskConfig.EnvFile)
 }
 
 // ApplyEnv returns the service manifest with environment overrides.
@@ -175,46 +217,18 @@ func (s LoadBalancedWebService) ApplyEnv(envName string) (WorkloadManifest, erro
 	return &s, nil
 }
 
-// RoutingRule holds the path to route requests to the service.
-type RoutingRule struct {
-	Path                *string                 `yaml:"path"`
-	HealthCheck         HealthCheckArgsOrString `yaml:"healthcheck"`
-	Stickiness          *bool                   `yaml:"stickiness"`
-	Alias               Alias                   `yaml:"alias"`
-	DeregistrationDelay *time.Duration          `yaml:"deregistration_delay"`
-	// TargetContainer is the container load balancer routes traffic to.
-	TargetContainer          *string `yaml:"target_container"`
-	TargetContainerCamelCase *string `yaml:"targetContainer"` // "targetContainerCamelCase" for backwards compatibility
-	AllowedSourceIps         []IPNet `yaml:"allowed_source_ips"`
+// NetworkLoadBalancerConfiguration holds options for a network load balancer
+type NetworkLoadBalancerConfiguration struct {
+	Port            *string            `yaml:"port"`
+	HealthCheck     NLBHealthCheckArgs `yaml:"healthcheck"`
+	TargetContainer *string            `yaml:"target_container"`
+	TargetPort      *int               `yaml:"target_port"`
+	SSLPolicy       *string            `yaml:"ssl_policy"`
+	Stickiness      *bool              `yaml:"stickiness"`
+	Aliases         Alias              `yaml:"alias"`
 }
 
-// IPNet represents an IP network string. For example: 10.1.0.0/16
-type IPNet string
-
-// Alias is a custom type which supports unmarshaling "http.alias" yaml which
-// can either be of type string or type slice of string.
-type Alias stringSliceOrString
-
-// IsEmpty returns empty if Alias is empty.
-func (e *Alias) IsEmpty() bool {
-	return e.String == nil && e.StringSlice == nil
-}
-
-// UnmarshalYAML overrides the default YAML unmarshaling logic for the Alias
-// struct, allowing it to perform more complex unmarshaling behavior.
-// This method implements the yaml.Unmarshaler (v3) interface.
-func (e *Alias) UnmarshalYAML(value *yaml.Node) error {
-	if err := unmarshalYAMLToStringSliceOrString((*stringSliceOrString)(e), value); err != nil {
-		return errUnmarshalEntryPoint
-	}
-	return nil
-}
-
-// ToStringSlice converts an Alias to a slice of string using shell-style rules.
-func (e *Alias) ToStringSlice() ([]string, error) {
-	out, err := toStringSlice((*stringSliceOrString)(e))
-	if err != nil {
-		return nil, err
-	}
-	return out, nil
+func (c *NetworkLoadBalancerConfiguration) IsEmpty() bool {
+	return c.Port == nil && c.HealthCheck.isEmpty() && c.TargetContainer == nil && c.TargetPort == nil &&
+		c.SSLPolicy == nil && c.Stickiness == nil && c.Aliases.IsEmpty()
 }

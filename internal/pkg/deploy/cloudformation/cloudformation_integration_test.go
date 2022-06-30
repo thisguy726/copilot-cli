@@ -1,4 +1,4 @@
-// +build integration
+//go:build integration
 
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
@@ -208,7 +208,7 @@ func Test_App_Infrastructure(t *testing.T) {
 			&cloudformation.AddEnvToAppOpts{
 				App:          &app,
 				EnvName:      "test",
-				EnvAccountID: "000312697014",
+				EnvAccountID: callerInfo.Account,
 				EnvRegion:    *sess.Config.Region,
 			},
 		)
@@ -349,7 +349,7 @@ func Test_App_Infrastructure(t *testing.T) {
 		err = deployer.AddEnvToApp(&cloudformation.AddEnvToAppOpts{
 			App:          &app,
 			EnvName:      "test",
-			EnvAccountID: "000312697014",
+			EnvAccountID: callerInfo.Account,
 			EnvRegion:    *sess.Config.Region,
 		})
 
@@ -431,14 +431,16 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 			require.NoError(t, err)
 		}()
 
-		urls, err := uploader.UploadEnvironmentCustomResources(awss3.CompressAndUploadFunc(func(key string, objects ...awss3.NamedBinary) (string, error) {
+		urls, err := uploader.UploadEnvironmentCustomResources(func(key string, objects ...awss3.NamedBinary) (string, error) {
 			return s3Client.ZipAndUpload(bucketName, key, objects...)
-		}))
+		})
 		require.NoError(t, err)
 		environmentToDeploy.CustomResourcesURLs = urls
+		environmentToDeploy.ArtifactBucketKeyARN = "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+		environmentToDeploy.ArtifactBucketARN = fmt.Sprintf("arn:aws:s3:::%s", bucketName)
 
 		// Deploy the environment and wait for it to be complete
-		require.NoError(t, deployer.DeployAndRenderEnvironment(os.Stderr, &environmentToDeploy))
+		require.NoError(t, deployer.CreateAndRenderEnvironment(os.Stderr, &environmentToDeploy))
 
 		// Ensure that the new stack exists
 		output, err = cfClient.DescribeStacks(&awsCF.DescribeStacksInput{
@@ -450,7 +452,7 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 		deployedStack := output.Stacks[0]
 		expectedResultsForKey := map[string]func(*awsCF.Output){
 			"EnabledFeatures": func(output *awsCF.Output) {
-				require.Equal(t, ",,", aws.StringValue(output.OutputValue), "no env features enabled by default")
+				require.Equal(t, ",,,", aws.StringValue(output.OutputValue), "no env features enabled by default")
 			},
 			"EnvironmentManagerRoleARN": func(output *awsCF.Output) {
 				require.Equal(t,
@@ -531,6 +533,16 @@ func Test_Environment_Deployment_Integration(t *testing.T) {
 				require.NotNil(t,
 					output.OutputValue,
 					"InternetGatewayID value should not be nil")
+			},
+			"PublicRouteTableID": func(output *awsCF.Output) {
+				require.Equal(t,
+					fmt.Sprintf("%s-PublicRouteTableID", envStackName),
+					*output.ExportName,
+					"Should export PublicRouteTableID as stackname-PublicRouteTableID when creating environment with default VPC")
+
+				require.NotNil(t,
+					output.OutputValue,
+					"PublicRouteTableID value should not be nil")
 			},
 			"EnvironmentSecurityGroup": func(output *awsCF.Output) {
 				require.Equal(t,

@@ -32,6 +32,10 @@ publish:
   topics:
     - name: customers
 
+network:
+  vpc:
+    placement: private
+
 # Optional fields for more advanced use-cases.
 #
 # variables:                    # Pass environment variables as key value pairs.
@@ -46,3 +50,9 @@ environments:
     command: crazy diamond
     variables:
       LOG_LEVEL: debug        # Log level for the "test" environment.
+  prod:
+    network:
+      vpc:
+        placement:
+          subnets: ["mockSubnetID1", "mockSubnetID2"]
+    

@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/copilot-cli/internal/pkg/workspace"
+
 	"github.com/aws/copilot-cli/internal/pkg/manifest"
 
 	"github.com/spf13/afero"
@@ -58,7 +58,7 @@ var basicNameTestCases = map[string]testCase{
 	},
 }
 
-func TestValidateProjectName(t *testing.T) {
+func TestValidateAppName(t *testing.T) {
 	// Any project-specific name validations can be added here
 	testCases := map[string]testCase{
 		"contains emoji": {
@@ -124,6 +124,11 @@ func TestValidateSvcName(t *testing.T) {
 			svcType: manifest.LoadBalancedWebServiceType,
 			wanted:  errValueBadFormat,
 		},
+		"is not a reserved name": {
+			val:     "pipelines",
+			svcType: manifest.LoadBalancedWebServiceType,
+			wanted:  errValueReserved,
+		},
 	}
 
 	for name, tc := range testCases {
@@ -143,6 +148,63 @@ func TestValidateEnvironmentName(t *testing.T) {
 			got := validateEnvironmentName(tc.input)
 
 			require.True(t, errors.Is(got, tc.want))
+		})
+	}
+}
+
+func TestValidatePipelineName(t *testing.T) {
+	testCases := map[string]struct {
+		val     interface{}
+		appName string
+
+		wanted            error
+		wantedErrorSuffix string
+	}{
+		"string as input": {
+			val:    "hello",
+			wanted: nil,
+		},
+		"number as input": {
+			val:    1234,
+			wanted: errValueNotAString,
+		},
+		"string with invalid characters": {
+			val:    "myPipe!",
+			wanted: errValueBadFormat,
+		},
+		"longer than 128 characters": {
+			val:               strings.Repeat("s", 129),
+			wantedErrorSuffix: fmt.Sprintf(fmtErrPipelineNameTooLong, 118),
+		},
+		"longer than 128 characters with pipeline-[app]": {
+			val:               strings.Repeat("x", 114),
+			appName:           "myApp",
+			wantedErrorSuffix: fmt.Sprintf(fmtErrPipelineNameTooLong, 113),
+		},
+		"does not start with letter": {
+			val:    "123chicken",
+			wanted: errValueBadFormat,
+		},
+		"starts with a dash": {
+			val:    "-beta",
+			wanted: errValueBadFormat,
+		},
+		"contains upper-case letters": {
+			val:    "badGoose",
+			wanted: errValueBadFormat,
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			got := validatePipelineName(tc.val, tc.appName)
+
+			if tc.wantedErrorSuffix != "" {
+				require.True(t, strings.HasSuffix(got.Error(), tc.wantedErrorSuffix), "got %v instead of %v", got, tc.wantedErrorSuffix)
+				return
+			}
+
+			require.True(t, errors.Is(got, tc.wanted), "got %v instead of %v", got, tc.wanted)
 		})
 	}
 }
@@ -311,35 +373,95 @@ func TestValidatePath(t *testing.T) {
 	}
 }
 
+type mockManifestReader struct {
+	out workspace.WorkloadManifest
+	err error
+}
+
+func (m mockManifestReader) ReadWorkloadManifest(name string) (workspace.WorkloadManifest, error) {
+	return m.out, m.err
+}
+
 func TestValidateStorageType(t *testing.T) {
 	testCases := map[string]struct {
-		input string
-		want  error
+		input     string
+		optionals validateStorageTypeOpts
+		want      error
 	}{
-		"S3 okay": {
+		"should allow S3 addons": {
 			input: "S3",
 			want:  nil,
 		},
-		"DDB okay": {
+		"should allow DynamoDB allows": {
 			input: "DynamoDB",
 			want:  nil,
 		},
-		//"RDS okay": {
-		//	// Hiding RDS for now.
-		//	input: "RDS",
-		//},
-		"Bad name": {
+		"should return an error if a storage type does not exist": {
 			input: "Dropbox",
 			want:  fmt.Errorf(fmtErrInvalidStorageType, "Dropbox", prettify(storageTypes)),
+		},
+		"should allow Aurora if workload name is not yet specified": {
+			input: "Aurora",
+			want:  nil,
+		},
+		"should return an error if manifest file cannot be read while initializing an Aurora storage type": {
+			input: "Aurora",
+			optionals: validateStorageTypeOpts{
+				ws: mockManifestReader{
+					err: errors.New("some error"),
+				},
+				workloadName: "api",
+			},
+			want: errors.New("invalid storage type Aurora: read manifest file for api: some error"),
+		},
+		"should allow Aurora if the workload type is not a RDWS": {
+			input: "Aurora",
+			optionals: validateStorageTypeOpts{
+				ws: mockManifestReader{
+					out: []byte(`
+name: api
+type: Load Balanced Web Service
+`),
+				},
+				workloadName: "api",
+			},
+		},
+		"should return an error if Aurora is selected for a RDWS while not connected to a VPC": {
+			input: "Aurora",
+			optionals: validateStorageTypeOpts{
+				ws: mockManifestReader{
+					out: []byte(`
+name: api
+type: Request-Driven Web Service
+`),
+				},
+				workloadName: "api",
+			},
+			want: errors.New("invalid storage type Aurora: Request-Driven Web Service requires a VPC connection"),
+		},
+		"should succeed if Aurora is selected and RDWS is connected to a VPC": {
+			input: "Aurora",
+			optionals: validateStorageTypeOpts{
+				ws: mockManifestReader{
+					out: []byte(`
+name: api
+type: Request-Driven Web Service
+network:
+  vpc:
+    placement: private
+`),
+				},
+				workloadName: "api",
+			},
 		},
 	}
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			got := validateStorageType(tc.input)
+			got := validateStorageType(tc.input, tc.optionals)
 			if tc.want == nil {
-				require.Nil(t, got)
+				require.NoError(t, got)
 			} else {
-				require.EqualError(t, tc.want, got.Error())
+				require.EqualError(t, got, tc.want.Error())
 			}
 		})
 	}
@@ -429,31 +551,71 @@ func TestValidateCIDR(t *testing.T) {
 	}
 }
 
-func TestValidateCIDRSlice(t *testing.T) {
+func Test_validatePublicSubnetsCIDR(t *testing.T) {
 	testCases := map[string]struct {
-		inputCIDRSlice string
-		wantError      error
+		in     string
+		numAZs int
+
+		wantedErr string
 	}{
-		"good case": {
-			inputCIDRSlice: "10.10.10.10/24,10.10.10.10/24",
-			wantError:      nil,
+		"returns nil if CIDRs are valid and match number of available AZs": {
+			in:     "10.10.10.10/24,10.10.10.10/24",
+			numAZs: 2,
 		},
-		"bad case": {
-			inputCIDRSlice: "mockBadInput",
-			wantError:      errValueNotIPNetSlice,
+		"returns err if number of CIDRs is not equal to number of available AZs": {
+			in:        "10.10.10.10/24,10.10.10.10/24",
+			numAZs:    3,
+			wantedErr: "number of public subnet CIDRs (2) does not match number of AZs (3)",
 		},
-		"bad IPNet case": {
-			inputCIDRSlice: "10.10.10.10,10.10.10.10",
-			wantError:      errValueNotIPNetSlice,
+		"returns err if input is not valid CIDR fmt": {
+			in:        "10.10.10.10,10.10.10.10",
+			numAZs:    2,
+			wantedErr: errValueNotIPNetSlice.Error(),
 		},
 	}
+
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			got := validateCIDRSlice(tc.inputCIDRSlice)
-			if tc.wantError != nil {
-				require.EqualError(t, got, tc.wantError.Error())
+			actual := validatePublicSubnetsCIDR(tc.numAZs)(tc.in)
+			if tc.wantedErr == "" {
+				require.NoError(t, actual)
 			} else {
-				require.Nil(t, got)
+				require.EqualError(t, actual, tc.wantedErr)
+			}
+		})
+	}
+}
+
+func Test_validatePrivateSubnetsCIDR(t *testing.T) {
+	testCases := map[string]struct {
+		in     string
+		numAZs int
+
+		wantedErr string
+	}{
+		"returns nil if CIDRs are valid and match number of available AZs": {
+			in:     "10.10.10.10/24,10.10.10.10/24",
+			numAZs: 2,
+		},
+		"returns err if number of CIDRs is not equal to number of available AZs": {
+			in:        "10.10.10.10/24,10.10.10.10/24",
+			numAZs:    3,
+			wantedErr: "number of private subnet CIDRs (2) does not match number of AZs (3)",
+		},
+		"returns err if input is not valid CIDR fmt": {
+			in:        "10.10.10.10,10.10.10.10",
+			numAZs:    2,
+			wantedErr: errValueNotIPNetSlice.Error(),
+		},
+	}
+
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			actual := validatePrivateSubnetsCIDR(tc.numAZs)(tc.in)
+			if tc.wantedErr == "" {
+				require.NoError(t, actual)
+			} else {
+				require.EqualError(t, actual, tc.wantedErr)
 			}
 		})
 	}
@@ -786,58 +948,29 @@ func Test_validateSubscribe(t *testing.T) {
 	}
 }
 
-func Test_validateTopicsExist(t *testing.T) {
-	mockApp := "app"
-	mockEnv := "env"
-	mockAllowedTopics := []string{
-		"arn:aws:sqs:us-west-2:123456789012:app-env-database-events",
-		"arn:aws:sqs:us-west-2:123456789012:app-env-database-orders",
-		"arn:aws:sqs:us-west-2:123456789012:app-env-api-events",
-	}
-	duration10Hours := 10 * time.Hour
-	testGoodTopics := []manifest.TopicSubscription{
-		{
-			Name:    aws.String("events"),
-			Service: aws.String("database"),
-		},
-		{
-			Name:    aws.String("orders"),
-			Service: aws.String("database"),
-			Queue: manifest.SQSQueueOrBool{
-				Advanced: manifest.SQSQueue{
-					Retention: &duration10Hours,
-				},
-			},
-		},
-	}
+func TestValidateJobName(t *testing.T) {
 	testCases := map[string]struct {
-		inTopics    []manifest.TopicSubscription
-		inTopicARNs []string
-
-		wantErr string
+		val    interface{}
+		wanted error
 	}{
-		"empty subscriptions": {
-			inTopics:    nil,
-			inTopicARNs: mockAllowedTopics,
+		"string as input": {
+			val:    "hello",
+			wanted: nil,
 		},
-		"topics are valid": {
-			inTopics:    testGoodTopics,
-			inTopicARNs: mockAllowedTopics,
+		"number as input": {
+			val:    1234,
+			wanted: errValueNotAString,
 		},
-		"topic is invalid": {
-			inTopics:    testGoodTopics,
-			inTopicARNs: []string{},
-			wantErr:     "SNS topic app-env-database-events does not exist in environment env",
+		"is not a reserved name": {
+			val:    "pipelines",
+			wanted: errValueReserved,
 		},
 	}
+
 	for name, tc := range testCases {
 		t.Run(name, func(t *testing.T) {
-			err := validateTopicsExist(tc.inTopics, tc.inTopicARNs, mockApp, mockEnv)
-			if tc.wantErr != "" {
-				require.EqualError(t, err, tc.wantErr)
-			} else {
-				require.NoError(t, err)
-			}
+			got := validateJobName(tc.val)
+			require.True(t, errors.Is(got, tc.wanted), "got %v instead of %v", got, tc.wanted)
 		})
 	}
 }

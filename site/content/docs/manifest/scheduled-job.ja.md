@@ -2,33 +2,34 @@
 
 ???+ note "レポートを作成する cron ジョブのサンプル Manifest"
 
-```yaml
-# Your job name will be used in naming your resources like log groups, ECS Tasks, etc.
-name: report-generator
-type: Scheduled Job
+    ```yaml
+        # Service 名はロググループや ECS タスクなどのリソースの命名に利用されます。
+        name: report-generator
+        type: Scheduled Job
+    
+        on:
+          schedule: "@daily"
+        cpu: 256
+        memory: 512
+        retries: 3
+        timeout: 1h
+    
+        image:
+          # Service で利用する Dockerfileへのパス.
+          build: ./Dockerfile
+    
+        variables:
+          LOG_LEVEL: info
+        env_file: log.env
+        secrets:
+          GITHUB_TOKEN: GITHUB_TOKEN
 
-on:
-  schedule: "@daily"
-cpu: 256
-memory: 512
-retries: 3
-timeout: 1h
-
-image:
-  # Path to your service's Dockerfile.
-  build: ./Dockerfile
-
-variables:
-  LOG_LEVEL: info
-secrets:
-  GITHUB_TOKEN: GITHUB_TOKEN
-
-# You can override any of the values defined above by environment.
-environments:
-  prod:
-    cpu: 2048               # Larger CPU value for prod environment
-    memory: 4096
-```
+        # 上記すべての値は Environment ごとにオーバーライド可能です。
+        environments:
+          prod:
+            cpu: 2048               # prod Enviroment では 大きな CPU 値。
+            memory: 4096
+    ```
 
 <a id="name" href="#name" class="field">`name`</a> <span class="type">String</span>  
 Job 名。
@@ -37,87 +38,43 @@ Job 名。
 
 <a id="type" href="#type" class="field">`type`</a> <span class="type">String</span>  
 Job のアーキテクチャタイプ。
-現在、Copilot は定期的にもしくは固定したスケジュールでトリガされるタスクである "Scheduled Job" タイプのみをサポートしています。
+現在、Copilot は定期的にもしくは固定したスケジュールでトリガーされるタスクである "Scheduled Job" タイプのみをサポートしています。
 
 <div class="separator"></div>
 
 <a id="on" href="#on" class="field">`on`</a> <span class="type">Map</span>  
-Job をトリガするイベントの設定。
+Job をトリガーするイベントの設定。
 
 <span class="parent-field">on.</span><a id="on-schedule" href="#on-schedule" class="field">`schedule`</a> <span class="type">String</span>  
-定期的に Job をトリガする頻度を指定できます。
+定期的に Job をトリガーする頻度を指定できます。
 サポートする頻度は:
 
-* `"@yearly"`
-* `"@monthly"`
-* `"@weekly"`
-* `"@daily"`
-* `"@hourly"`
+
+| 頻度         | 以下と同一              | `UTC` を用いた可読表記による実行タイミング             |
+| ------------ | --------------------- | --------------------------------------------- |
+| `"@yearly"`  | `"cron(0 * * * ? *)"` | 1 月 1 日の午前 0 時                            |
+| `"@monthly"` | `"cron(0 0 1 * ? *)"` | 毎月 1 日の午前 0 時                            |
+| `"@weekly"`  | `"cron(0 0 ? * 1 *)"` | 毎週日曜日の午前 0 時                            |
+| `"@daily"`   | `"cron(0 0 * * ? *)"` | 毎日午前 0 時                                   |
+| `"@hourly"`  | `"cron(0 * * * ? *)"` | 毎時 0 分                                      |
+
 * `"@every {duration}"` (例: "1m", "5m")
 * `"rate({duration})"` CloudWatch の[rate 式](https://docs.aws.amazon.com/ja_jp/AmazonCloudWatch/latest/events/ScheduledEvents.html#RateExpressions) の形式
 
-特定の時間に Job をトリガしたい場合、cron でスケジュールを指定できます。
+特定の時間に Job をトリガーしたい場合、cron でスケジュールを指定できます。
 
 * `"* * * * *"` 標準的な [cron フォーマット](https://en.wikipedia.org/wiki/Cron#Overview)を利用する
 * `"cron({fields})"` 6 つフィールドからなる CloudWatch の[cron 式](https://docs.aws.amazon.com/ja_jp/AmazonCloudWatch/latest/events/ScheduledEvents.html#CronExpressions) を利用する
+
+最後に、例えば `schedule` フィールドを `none` に設定することで、Job がトリガーされないようにすることができます。
+```yaml
+on:
+  schedule: "none"
+```
+
 <div class="separator"></div>
 
-<a id="image" href="#image" class="field">`image`</a> <span class="type">Map</span>  
-image セクションは Docker の build に関するパラメータを持ちます。
-
-<span class="parent-field">image.</span><a id="image-build" href="#image-build" class="field">`build`</a> <span class="type">String or Map</span>  
-String 型を設定した場合、Copilot はそれを Dockerfile へのパスと解釈します。指定したディレクトリがビルドコンテキストとなります。下記の Manifest を指定した場合:
-```yaml
-image:
-  build: path/to/dockerfile
-```
-このコマンドを実行した場合と同じ結果になります。  
-`$ docker build --file path/to/dockerfile path/to`
-
-Map 型も指定できます:
-
-```yaml
-image:
-  build:
-    dockerfile: path/to/dockerfile
-    context: context/dir
-    target: build-stage
-    cache_from:
-      - image:tag
-    args:
-      key: value
-```
-
-この場合、Copilot は指定したコンテキストディレクトリを使用します。また、args で指定した key-value のペアで `--build-arg` を上書きします。これは下記の docker コマンドの実行と同等です。
-
-`$ docker build --file path/to/dockerfile --target build-stage --cache-from image:tag --build-arg key=value context/dir`.
-
-フィールドは省略できます。その場合、Copilot は可能な限り意図を汲み取ろうと試みます。例えば、`context` を指定しても、`dockerfile`を指定しなかった場合、Copilot はコンテキストディレクトリで Docker を実行し、”Dockerfile”という名前のファイルを Dockerfile とみなします。逆に、`dockerfile`を指定し、`context`を指定しなかった場合、Copilot は `dockerfile` が配置されたディレクトリで Docker を実行したいのだと推測します。
-
-全てのパスはワークスペースをルートとした相対パスで記述できます。
-
-<span class="parent-field">image.</span><a id="image-location" href="#image-location" class="field">`location`</a> <span class="type">String</span>  
-Dockerfile からコンテナイメージをビルドする代わりに、既存のコンテナイメージ名の指定も可能です。`image.location` と [`image.build`](#image-build) の同時利用はできません。
-`location` フィールドの制約を含む指定方法は Amazon ECS タスク定義の [`image` パラメータ](https://docs.aws.amazon.com/ja_jp/AmazonECS/latest/developerguide/task_definition_parameters.html#container_definition_image)のそれに従います。
-
-<span class="parent-field">image.</span><a id="image-labels" href="#image-labels" class="field">`labels`</a><span class="type">Map</span>  
-コンテナに付与したい [Docker ラベル](https://docs.docker.com/config/labels-custom-metadata/)を key/value の Map で指定できます。これは任意設定項目です。
-
-<span class="parent-field">image.</span><a id="image-depends-on" href="#image-depends-on" class="field">`depends_on`</a> <span class="type">Map</span>  
-任意項目。コンテナに追加する [Container Dependencies](https://docs.aws.amazon.com/ja_jp/AmazonECS/latest/APIReference/API_ContainerDependency.html) の任意の key/value の Map。Map の key はコンテナ名で、value は依存関係を表す値 (依存条件) として `start`、`healthy`、`complete`、`success` のいずれかを指定できます。なお、必須コンテナに `complete` や `success` の依存条件を指定することはできません。
-
-!!! note
-    サイドカーのコンテナヘルスチェックは、現在 Copilot ではサポートされていません。つまり、`healthy` はサイドカーの有効な依存条件ではありません。
-
-設定例:
-```yaml
-image:
-  build: ./Dockerfile
-  depends_on:
-    nginx: start
-    startup: success
-```
-上記の例では、タスクのメインコンテナは `nginx` サイドカーが起動し、`startup` コンテナが正常に完了してから起動します。
+{% include 'image-config.ja.md' %}
 
 <div class="separator"></div>
 
@@ -156,7 +113,18 @@ command: ["ps", "au"]
 <div class="separator"></div>
 
 <a id="platform" href="#platform" class="field">`platform`</a> <span class="type">String</span>  
-`docker build --platform` で渡すオペレーティングシステムとアーキテクチャ。（`[os]/[arch]` の形式で指定）
+`docker build --platform` で渡すオペレーティングシステムとアーキテクチャ。（`[os]/[arch]` の形式で指定） 例えば、`linux/arm64` や `windows/x86_64` といった値です。デフォルトは `linux/x86_64` です。
+
+生成された文字列を上書きして、有効な異なる `osfamily` や `architecture` を明示的に指定してビルドすることができます。例えば Windows ユーザーの場合は、
+```yaml
+platform: windows/x86_64
+```
+とするとデフォルトは `WINDOWS_SERVER_2019_CORE` が利用されますが、 Map を使って以下のように指定できます：
+```yaml
+platform:
+  osfamily: windows_server_2019_full
+  architecture: x86_64
+```
 
 <div class="separator"></div>
 
@@ -245,7 +213,7 @@ EFS の高度な認可の設定を指定します。
 logging セクションには、コンテナの [FireLens](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/using_firelens.html) ログドライバ用のログ設定パラメータが含まれます。(設定例は[こちら](../developing/sidecars.ja.md#sidecar-patterns))
 
 <span class="parent-field">logging.</span><a id="logging-image" href="#logging-image" class="field">`image`</a> <span class="type">Map</span>  
-任意項目。使用する Fluent Bit のイメージ。デフォルト値は `amazon/aws-for-fluent-bit:latest`。
+任意項目。使用する Fluent Bit のイメージ。デフォルト値は `public.ecr.aws/aws-observability/aws-for-fluent-bit:stable`。
 
 <span class="parent-field">logging.</span><a id="logging-destination" href="#logging-destination" class="field">`destination`</a> <span class="type">Map</span>  
 任意項目。Firelens ログドライバーにログを送信するときの設定。

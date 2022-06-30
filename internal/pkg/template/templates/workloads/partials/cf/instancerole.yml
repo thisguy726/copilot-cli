@@ -43,7 +43,22 @@ InstanceRole:
               Action: 'sns:Publish'
               Resource:
               {{- range $topic := .Publish.Topics }}
-              - !Ref {{$topic.Name}}SNSTopic
+              - !Ref {{logicalIDSafe $topic.Name}}SNSTopic
               {{- end }}
       {{- end }}
       {{- end }}
+      {{- if eq .Observability.Tracing "AWSXRAY"}}
+      - PolicyName: 'EnableAWSXRayTracing'
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: 'Allow'
+              Action: 
+                - 'xray:PutTraceSegments'
+                - 'xray:PutTelemetryRecords'
+                - 'xray:GetSamplingRules'
+                - 'xray:GetSamplingTargets'
+                - 'xray:GetSamplingStatisticSummaries'
+                - 'ssm:GetParameters'
+              Resource: '*'
+      {{- end}}

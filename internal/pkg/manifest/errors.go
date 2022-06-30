@@ -19,14 +19,14 @@ func (e *ErrInvalidWorkloadType) Error() string {
 	return fmt.Sprintf("invalid manifest type: %s", e.Type)
 }
 
-// ErrInvalidPipelineManifestVersion occurs when the pipeline.yml file
+// ErrInvalidPipelineManifestVersion occurs when the pipeline.yml/manifest.yml file
 // contains invalid schema version during unmarshalling.
 type ErrInvalidPipelineManifestVersion struct {
 	invalidVersion PipelineSchemaMajorVersion
 }
 
 func (e *ErrInvalidPipelineManifestVersion) Error() string {
-	return fmt.Sprintf("pipeline.yml contains invalid schema version: %d", e.invalidVersion)
+	return fmt.Sprintf("pipeline manifest contains invalid schema version: %d", e.invalidVersion)
 }
 
 // Is compares the 2 errors. Only returns true if the errors are of the same
@@ -60,11 +60,15 @@ type errFieldMustBeSpecified struct {
 }
 
 func (e *errFieldMustBeSpecified) Error() string {
-	errMsg := fmt.Sprintf(`"%s" must be specified`, e.missingField)
+	errMsg := fmt.Sprintf(`%q must be specified`, e.missingField)
 	if len(e.conditionalFields) == 0 {
 		return errMsg
 	}
-	return fmt.Sprintf(`%s if "%s" %s specified`, errMsg, english.WordSeries(e.conditionalFields, "or"),
+	quoted := make([]string, len(e.conditionalFields))
+	for i, f := range e.conditionalFields {
+		quoted[i] = strconv.Quote(f)
+	}
+	return fmt.Sprintf(`%s if %s %s specified`, errMsg, english.WordSeries(quoted, "or"),
 		english.PluralWord(len(e.conditionalFields), "is", "are"))
 }
 
@@ -100,7 +104,9 @@ func (e *errAtLeastOneFieldMustBeSpecified) Error() string {
 	for i, f := range e.missingFields {
 		quotedFields[i] = strconv.Quote(f)
 	}
-	return fmt.Sprintf(`must specify at least one of %s if "%s" is specified`,
-		english.WordSeries(quotedFields, "or"),
-		e.conditionalField)
+	errMsg := fmt.Sprintf("must specify at least one of %s", english.WordSeries(quotedFields, "or"))
+	if e.conditionalField != "" {
+		errMsg = fmt.Sprintf(`%s if "%s" is specified`, errMsg, e.conditionalField)
+	}
+	return errMsg
 }

@@ -136,7 +136,7 @@ QueuePolicy:
           Resource: !GetAtt EventsQueue.Arn
           Condition:
             ArnEquals:
-              aws:SourceArn: !Join ['', [!Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:', !Ref AppName, '-', !Ref EnvName, '-{{$topic.Service}}-{{logicalIDSafe $topic.Name}}']]
+              aws:SourceArn: !Join ['', [!Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:', !Ref AppName, '-', !Ref EnvName, '-{{$topic.Service}}-{{$topic.Name}}']]
         {{- end}}
         {{- end}}
 
@@ -146,8 +146,11 @@ QueuePolicy:
     'aws:copilot:description': 'A SNS subscription to topic {{$topic.Name}} from service {{$topic.Service}}'
   Type: AWS::SNS::Subscription
   Properties:
-    TopicArn: !Join ['', [!Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:', !Ref AppName, '-', !Ref EnvName, '-{{$topic.Service}}-{{logicalIDSafe $topic.Name}}']]
+    TopicArn: !Join ['', [!Sub 'arn:${AWS::Partition}:sns:${AWS::Region}:${AWS::AccountId}:', !Ref AppName, '-', !Ref EnvName, '-{{$topic.Service}}-{{$topic.Name}}']]
     Protocol: 'sqs'
+    {{- if $topic.FilterPolicy}}
+    FilterPolicy: {{$topic.FilterPolicy}}
+    {{- end}}
     {{- if $topic.Queue}}
     Endpoint: !GetAtt {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue.Arn
     {{- else}}
@@ -157,7 +160,7 @@ QueuePolicy:
 {{- if $topic.Queue}}
 {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}EventsQueue:
   Metadata:
-    'aws:copilot:description': 'A SQS queue to buffer messages from the topic {{logicalIDSafe $topic.Name}}'
+    'aws:copilot:description': 'A SQS queue to buffer messages from the topic {{$topic.Name}}'
   Type: AWS::SQS::Queue
   Properties:
     KmsMasterKeyId: !Ref EventsKMSKey
@@ -179,7 +182,7 @@ QueuePolicy:
 {{- if $topic.Queue.DeadLetter}}
 {{logicalIDSafe $topic.Service}}{{logicalIDSafe $topic.Name}}DeadLetterQueue:
   Metadata:
-    'aws:copilot:description': 'A dead letter SQS queue to buffer failed messages from the topic {{logicalIDSafe $topic.Name}}'
+    'aws:copilot:description': 'A dead letter SQS queue to buffer failed messages from the topic {{$topic.Name}}'
   Type: AWS::SQS::Queue
   Properties:
     KmsMasterKeyId: !Ref EventsKMSKey

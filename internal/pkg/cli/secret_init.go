@@ -6,16 +6,20 @@ package cli
 import (
 	"errors"
 	"fmt"
-	"os"
 	"sort"
 	"strings"
-	txttemplate "text/template"
+
+	"golang.org/x/text/cases"
+	"golang.org/x/text/language"
+
+	"github.com/aws/copilot-cli/internal/pkg/aws/identity"
 
 	"github.com/dustin/go-humanize/english"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/aws/aws-sdk-go/aws"
+	awsssm "github.com/aws/aws-sdk-go/service/ssm"
 
 	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
@@ -24,7 +28,6 @@ import (
 	"github.com/aws/copilot-cli/internal/pkg/aws/ssm"
 	"github.com/aws/copilot-cli/internal/pkg/config"
 	"github.com/aws/copilot-cli/internal/pkg/deploy"
-	"github.com/aws/copilot-cli/internal/pkg/template"
 	"github.com/aws/copilot-cli/internal/pkg/term/color"
 	"github.com/aws/copilot-cli/internal/pkg/term/log"
 	"github.com/aws/copilot-cli/internal/pkg/term/prompt"
@@ -32,7 +35,8 @@ import (
 )
 
 const (
-	fmtSecretParameterName = "/copilot/%s/%s/secrets/%s"
+	fmtSecretParameterName           = "/copilot/%s/%s/secrets/%s"
+	fmtSecretParameterNameMftExample = "/copilot/${COPILOT_APPLICATION_NAME}/${COPILOT_ENVIRONMENT_NAME}/secrets/%s"
 )
 
 const (
@@ -76,11 +80,13 @@ type secretInitOpts struct {
 }
 
 func newSecretInitOpts(vars secretInitVars) (*secretInitOpts, error) {
-	store, err := config.NewStore()
+	sessProvider := sessions.ImmutableProvider(sessions.UserAgentExtras("secret init"))
+	defaultSession, err := sessProvider.Default()
 	if err != nil {
-		return nil, fmt.Errorf("new config store: %w", err)
+		return nil, err
 	}
 
+	store := config.NewSSMStore(identity.New(defaultSession), awsssm.New(defaultSession), aws.StringValue(defaultSession.Config.Region))
 	prompter := prompt.New()
 	opts := secretInitOpts{
 		secretInitVars: vars,
@@ -91,7 +97,7 @@ func newSecretInitOpts(vars secretInitVars) (*secretInitOpts, error) {
 		secretPutters:  make(map[string]secretPutter),
 
 		prompter: prompter,
-		selector: selector.NewSelect(prompter, store),
+		selector: selector.NewAppEnvSelector(prompter, store),
 	}
 
 	opts.configureClientsForEnv = func(envName string) error {
@@ -108,7 +114,7 @@ func newSecretInitOpts(vars secretInitVars) (*secretInitOpts, error) {
 		if err != nil {
 			return err
 		}
-		sess, err := sessions.NewProvider().FromRole(env.ManagerRoleARN, env.Region)
+		sess, err := sessProvider.FromRole(env.ManagerRoleARN, env.Region)
 		if err != nil {
 			return fmt.Errorf("create session from environment manager role %s in region %s: %w", env.ManagerRoleARN, env.Region, err)
 		}
@@ -376,7 +382,7 @@ func (o *secretInitOpts) askForSecretValues() error {
 	}
 
 	if len(envs) == 0 {
-		log.Errorf("Secrets environment-level resources. Please run %s before running %s.\n",
+		log.Errorf("Secrets are environment-level resources. Please run %s before running %s.\n",
 			color.HighlightCode("copilot env init"),
 			color.HighlightCode("copilot secret init"))
 		return fmt.Errorf("no environment is found in app %s", o.appName)
@@ -387,7 +393,7 @@ func (o *secretInitOpts) askForSecretValues() error {
 		value, err := o.prompter.GetSecret(
 			fmt.Sprintf(fmtSecretInitSecretValuePrompt, color.HighlightUserInput(o.name), env.Name),
 			fmt.Sprintf(fmtSecretInitSecretValuePromptHelp, color.HighlightUserInput(o.name), env.Name),
-			prompt.WithFinalMessage(fmt.Sprintf("%s secret value:", strings.Title(env.Name))),
+			prompt.WithFinalMessage(fmt.Sprintf("%s secret value:", cases.Title(language.English).String(env.Name))),
 		)
 		if err != nil {
 			return fmt.Errorf("get secret value for %s in environment %s: %w", color.HighlightUserInput(o.name), env.Name, err)
@@ -403,33 +409,15 @@ func (o *secretInitOpts) askForSecretValues() error {
 
 // RecommendActions shows recommended actions to do after running `secret init`.
 func (o *secretInitOpts) RecommendActions() error {
-	type secretInitOutput struct {
-		SecretsPerEnv map[string]map[string]string
+	secretsManifestExample := "secrets:"
+	for secretName := range o.secretValues {
+		currSecret := fmt.Sprintf("%s: %s", secretName, fmt.Sprintf(fmtSecretParameterNameMftExample, secretName))
+		secretsManifestExample = fmt.Sprintf("%s\n%s", secretsManifestExample, fmt.Sprintf("    %s", currSecret))
 	}
-
-	// Transpose secret values so that environment is the first-level key.
-	secretsPerEnv := make(map[string]map[string]string)
-	for secretName, values := range o.secretValues {
-		for envName := range values {
-			if _, ok := secretsPerEnv[envName]; !ok {
-				secretsPerEnv[envName] = make(map[string]string)
-			}
-			secretsPerEnv[envName][template.ToSnakeCaseFunc(secretName)] = fmt.Sprintf(fmtSecretParameterName, o.appName, envName, secretName)
-		}
-	}
-
-	templateRaw := `{{range $env, $secrets := .SecretsPerEnv -}}
-{{$env}}
-  secrets: {{range $secretName, $secretValueFrom := $secrets}}
-    {{$secretName}}: {{$secretValueFrom}}
-  {{- end}}
-{{end}}`
-	tmpl, _ := txttemplate.New("secretInitOutput").Parse(templateRaw)
 
 	log.Infoln("You can refer to these secrets from your manifest file by editing the `secrets` section.")
-	return tmpl.Execute(os.Stdout, secretInitOutput{
-		SecretsPerEnv: secretsPerEnv,
-	})
+	log.Infoln(color.HighlightCode(secretsManifestExample))
+	return nil
 }
 
 type errSecretFailedInSomeEnvironments struct {

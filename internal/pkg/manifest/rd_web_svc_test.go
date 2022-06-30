@@ -316,6 +316,47 @@ func TestRequestDrivenWebService_Port(t *testing.T) {
 	require.Equal(t, uint16(80), actual)
 }
 
+func TestRequestDrivenWebService_ContainerPlatform(t *testing.T) {
+	t.Run("should return platform string with values found in args", func(t *testing.T) {
+		// GIVEN
+		mft := RequestDrivenWebService{
+			RequestDrivenWebServiceConfig: RequestDrivenWebServiceConfig{
+				InstanceConfig: AppRunnerInstanceConfig{
+					Platform: PlatformArgsOrString{
+						PlatformArgs: PlatformArgs{
+							OSFamily: aws.String("ososos"),
+							Arch:     aws.String("arch"),
+						},
+					},
+				},
+			},
+		}
+		// WHEN
+		actual := mft.ContainerPlatform()
+
+		// THEN
+		require.Equal(t, "ososos/arch", actual)
+	})
+	t.Run("should return default platform if platform field empty", func(t *testing.T) {
+		// GIVEN
+		mft := RequestDrivenWebService{
+			RequestDrivenWebServiceConfig: RequestDrivenWebServiceConfig{
+				InstanceConfig: AppRunnerInstanceConfig{
+					Platform: PlatformArgsOrString{
+						PlatformString: nil,
+					},
+				},
+			},
+		}
+		// WHEN
+		actual := mft.ContainerPlatform()
+
+		// THEN
+		require.Equal(t, "linux/amd64", actual)
+
+	})
+}
+
 func TestRequestDrivenWebService_Publish(t *testing.T) {
 	testCases := map[string]struct {
 		mft *RequestDrivenWebService
@@ -544,6 +585,42 @@ func TestRequestDrivenWebService_ApplyEnv(t *testing.T) {
 
 			// THEN
 			require.Equal(t, tc.wanted, conf, "returned configuration should have overrides from the environment")
+		})
+	}
+}
+
+func TestRequestDrivenWebService_RequiredEnvironmentFeatures(t *testing.T) {
+	testCases := map[string]struct {
+		mft    func(svc *RequestDrivenWebService)
+		wanted []string
+	}{
+		"no feature required by default": {
+			mft: func(svc *RequestDrivenWebService) {},
+		},
+		"nat feature required": {
+			mft: func(svc *RequestDrivenWebService) {
+				svc.Network = RequestDrivenWebServiceNetworkConfig{
+					VPC: rdwsVpcConfig{
+						Placement: PlacementArgOrString{
+							PlacementString: placementStringP(PrivateSubnetPlacement),
+						},
+					},
+				}
+			},
+			wanted: []string{template.NATFeatureName},
+		},
+	}
+	for name, tc := range testCases {
+		t.Run(name, func(t *testing.T) {
+			inSvc := RequestDrivenWebService{
+				Workload: Workload{
+					Name: aws.String("mock-svc"),
+					Type: aws.String(RequestDrivenWebServiceType),
+				},
+			}
+			tc.mft(&inSvc)
+			got := inSvc.RequiredEnvironmentFeatures()
+			require.Equal(t, tc.wanted, got)
 		})
 	}
 }
