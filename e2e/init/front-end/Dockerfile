@@ -1,4 +1,4 @@
-FROM nginx
+FROM nginx:stable
 
 RUN mkdir -p /www/data/
 COPY index.html /www/data/
