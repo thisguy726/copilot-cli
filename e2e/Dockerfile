@@ -1,4 +1,4 @@
-FROM docker:20.10.13-dind
+FROM docker:20.10.17-dind
 
 ARG GOLANG_VERSION=1.18
 
