@@ -1,4 +1,4 @@
-FROM alpine:3.13.2
+FROM alpine:3.13.9
 
 RUN mkdir /app
 
