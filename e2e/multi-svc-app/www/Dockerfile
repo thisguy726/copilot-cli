@@ -19,7 +19,7 @@ ENV GOPROXY=direct
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64  go build -o www ./
 
 # To make our images smaller, use alpine and copy in the service binary.
-FROM alpine:latest
+FROM alpine:3.15.4
 # Install certs
 RUN apk --no-cache add ca-certificates
 # Copy the binary from the builder image
