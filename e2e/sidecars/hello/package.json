@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "koa": "^1.2.5",
+    "koa": "^2.16.1",
     "koa-router": "^5.4.0",
     "lorem-ipsum": "1.0.4"
   },
